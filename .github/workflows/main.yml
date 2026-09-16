@@ -27,12 +27,19 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl
+          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl xz-utils
           
       - name: Set up Android Image Kitchen (AIK)
         run: |
           git clone -b AIK-Linux https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
           chmod +x $HOME/AIK-Linux/*.sh
+          
+      - name: Download Toolchain (Fixes compiler not found error)
+        run: |
+          cd $HOME
+          wget -q https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/aarch64-linux-gnu/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz
+          tar -xf gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz
+          rm gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz
           
       - name: Prepare Workspace
         run: |
@@ -64,11 +71,28 @@ jobs:
           sed -i '/^static int do_execveat_common(/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
           sed -i 's/\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(\&fd, \&filename, \&argv, \&envp, \&flags, \&retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif/' fs/exec.c
           
-      - name: Apply Manual Hook - fs/stat.c
+      - name: Apply Manual Hook - fs/stat.c (Fixes missing newfstat_ret error)
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n' fs/stat.c
+          # Add prototypes for stat, newfstat_ret, and fstat64_ret
+          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n' fs/stat.c
+          
+          # Hook newfstatat and fstatat64
           sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
+          
+          # Hook newfstat return
+          sed -i '/error = cp_new_stat(\&stat, statbuf);/a \
+\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+\tksu_handle_newfstat_ret(\&fd, \&statbuf);\
+#endif' fs/stat.c
+          
+          # Hook fstat64 return
+          sed -i '/error = cp_new_stat64(\&stat, statbuf);/a \
+\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+\tksu_handle_fstat64_ret(\&fd, \&statbuf);\
+#endif' fs/stat.c
           
       - name: Apply Manual Hook - fs/open.c
         run: |
