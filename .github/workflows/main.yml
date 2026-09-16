@@ -55,7 +55,7 @@ jobs:
           echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> arch/arm64/configs/g950x_defconfig
           echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> arch/arm64/configs/g950x_defconfig
 
-      - name: Patch Makefile for Modern GCC (SAFE: in-line substitutions only)
+      - name: Patch Makefile for Modern GCC
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
           # Remove -Werror flags that cause modern GCC to choke on 2016 kernel code
