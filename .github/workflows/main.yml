@@ -24,15 +24,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies & cross-compiler
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl gcc-aarch64-linux-gnu
+          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl xz-utils
 
       - name: Set up Android Image Kitchen (AIK)
         run: |
           git clone -b AIK-Linux https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
           chmod +x $HOME/AIK-Linux/*.sh
+
+      - name: Download Linaro GCC 7.5 Toolchain
+        run: |
+          cd $HOME
+          wget -q "https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/aarch64-linux-gnu/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz"
+          tar -xf gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz
+          rm gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz
+          $HOME/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-gcc --version
 
       - name: Prepare Workspace
         run: |
@@ -90,8 +98,6 @@ jobs:
           chmod +x build.sh
           sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
           sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
-          sed -i 's/make -j\$N/make -j$N KCFLAGS="-Wno-attribute-alias"/' build.sh
-          export CROSS_COMPILE=aarch64-linux-gnu-
           ./build.sh
 
       - name: Upload Kernel Artifacts
