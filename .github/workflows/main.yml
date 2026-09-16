@@ -41,6 +41,20 @@ jobs:
           # Apply critical patches to rtw88 driver for older kernel compatibility
           find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/NL80211_SCAN_FLAG_RANDOM_SN/NL80211_SCAN_FLAG_RANDOM_ADDR/g' {} +
           find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/RX_FLAG_NO_PSDU/0/g' {} +
+          # Verify patches were applied
+          if grep -r 'NL80211_SCAN_FLAG_RANDOM_SN' drivers/net/wireless/realtek/rtw88 > /dev/null; then
+            echo "ERROR: SN NOT PATCHED"
+            exit 1
+          else
+            echo "SN PATCHED OK"
+          fi
+          
+          if grep -r 'RX_FLAG_NO_PSDU' drivers/net/wireless/realtek/rtw88 > /dev/null; then
+            echo "ERROR: PSDU NOT PATCHED"
+            exit 1
+          else
+            echo "PSDU PATCHED OK"
+          fi
           
           # Add Kconfig and Makefile entries for A2N structure
           grep -q 'realtek/rtw88/Kconfig' drivers/net/wireless/realtek/Kconfig || \
@@ -53,6 +67,7 @@ jobs:
           set -euo pipefail
           echo "Integrating NoMount (dev branch) into kernel source..."
           curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
+          echo "NoMount integration completed successfully!"
 
       - name: Integrate ReSukiSU into Kernel Source
         run: |
@@ -93,8 +108,10 @@ jobs:
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+          ./scripts/config --enable CONFIG_KSU_KPROBES_HOOK         
           
           # 6. Other features
+          ./scripts/config --enable CONFIG_KPM
           ./scripts/config --enable CONFIG_EXT4_FS
           ./scripts/config --enable CONFIG_OVERLAY_FS
           ./scripts/config --enable CONFIG_PACKET
