@@ -96,18 +96,31 @@ jobs:
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
           cd $HOME/Samsung_dreamlte_Kernel
           chmod +x build.sh
+          
+          # 1. Fix bash variable expansion issues in build.sh
           sed -i 's/\$MODEL_defconfig/${MODEL}_defconfig/g' build.sh
+          sed -i 's/\$MODEL_9\.x/${MODEL}_9.x/g' build.sh
+          
+          # 2. Update the MODEL variable to the selected input
           sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
+          
+          # 3. Fix rm command and merge_config logic
           sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
-          sed -i 's|^ARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig$|if [ ! -f .config ]; then\n\tARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig\nfi|' build.sh
+          sed -i 's|^ARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/\${MODEL}_defconfig$|if [ ! -f .config ]; then\n\tARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig\nfi|' build.sh
+          
+          # 4. Create the output directory structure that build.sh expects but doesn't create
+          mkdir -p $HOME/a2n_kernel_${MODEL}_9.x/system/lib/modules
+          
           export CROSS_COMPILE=aarch64-linux-gnu-
           export KCFLAGS="-Wno-attribute-alias -Wno-dangling-pointer -Wno-address -Wno-array-bounds -Wno-attributes"
+          
           if [ "$MODEL" = "g950x" ]; then
             make ARCH=arm64 g950x_defconfig
           else
             ARCH=arm64 scripts/kconfig/merge_config.sh -m arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig || true
             if [ -f .config ]; then make ARCH=arm64 olddefconfig; else make ARCH=arm64 ${MODEL}_defconfig; fi
           fi
+          
           ./build.sh || {
             echo "===== POST-MORTEM ====="
             free -h
@@ -115,7 +128,6 @@ jobs:
             make kernel/built-in.o V=1 2>&1 | tail -40
             exit 1
           }
-
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
