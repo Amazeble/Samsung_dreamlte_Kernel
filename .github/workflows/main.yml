@@ -1,0 +1,102 @@
+name: Build Kernel with ReSukiSU
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Device Model (g950x, g955x, n950x, etc.)'
+        required: false
+        default: 'g950x'
+
+jobs:
+  build-kernel:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies & cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl gcc-aarch64-linux-gnu
+
+      - name: Set up Android Image Kitchen (AIK)
+        run: |
+          git clone -b AIK-Linux https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
+          chmod +x $HOME/AIK-Linux/*.sh
+
+      - name: Prepare Workspace
+        run: |
+          ln -sf $GITHUB_WORKSPACE $HOME/Samsung_dreamlte_Kernel
+
+      - name: Integrate ReSukiSU
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+      - name: Add ReSukiSU Configs
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          for defconfig in arch/arm64/configs/*_defconfig; do
+            if [ -f "$defconfig" ]; then
+              echo "" >> "$defconfig"
+              echo "# ReSukiSU" >> "$defconfig"
+              echo "CONFIG_KSU=y" >> "$defconfig"
+              echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$defconfig"
+              echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" >> "$defconfig"
+              echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> "$defconfig"
+              echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> "$defconfig"
+            fi
+          done
+
+      - name: Apply Manual Hook - fs/exec.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          sed -i '/^static int do_execveat_common(/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
+          sed -i 's/\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(\&fd, \&filename, \&argv, \&envp, \&flags, \&retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif/' fs/exec.c
+
+      - name: Apply Manual Hook - fs/stat.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n' fs/stat.c
+          sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
+          sed -i '/error = cp_new_stat(\&stat, statbuf);/a #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
+          sed -i '/error = cp_new_stat64(\&stat, statbuf);/a #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
+
+      - name: Apply Manual Hook - fs/open.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          sed -i '/^SYSCALL_DEFINE3(faccessat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n' fs/open.c
+          sed -i '/\tif (mode \& ~S_IRWXO)/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif' fs/open.c
+
+      - name: Apply Manual Hook - kernel/reboot.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n' kernel/reboot.c
+          sed -i '/\t\/\* We only trust the superuser with rebooting the system\. \*\//i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif' kernel/reboot.c
+
+      - name: Run Build Script
+        run: |
+          MODEL="${{ github.event.inputs.model || 'g950x' }}"
+          chmod +x build.sh
+          sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
+          sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          ./build.sh
+
+      - name: Upload Kernel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-${{ github.event.inputs.model || 'g950x' }}
+          path: |
+            ~/a2n_kernel_*/a2n_kernel_*.zip
+            ~/a2n_kernel_*/boot.img
