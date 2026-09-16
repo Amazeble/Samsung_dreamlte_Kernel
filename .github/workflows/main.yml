@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: 'Device Model (g950x, g950x_kor, g955x, g955x_kor, n950x, n950x_kor)'
+        description: 'Device model (g950x, g950x_kor, g955x, g955x_kor, n950x, n950x_kor)'
         required: false
         default: 'g950x'
 
@@ -19,22 +19,21 @@ jobs:
   build-kernel:
     name: Build Kernel
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies & System Cross-Compiler
+      - name: Install dependencies and cross-compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl xz-utils gcc-aarch64-linux-gnu
 
-      - name: Set up Android Image Kitchen (AIK)
+      - name: Set up Android Image Kitchen
         run: |
           git clone -b AIK-Linux https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
           chmod +x $HOME/AIK-Linux/*.sh
 
-      - name: Prepare Workspace
+      - name: Prepare workspace
         run: |
           ln -sf $GITHUB_WORKSPACE $HOME/Samsung_dreamlte_Kernel
 
@@ -43,90 +42,68 @@ jobs:
           cd $HOME/Samsung_dreamlte_Kernel
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Add ReSukiSU Configs
+      - name: Add ReSukiSU configs to master defconfig
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          # Append only to the master config (g950x_defconfig)
-          echo "" >> arch/arm64/configs/g950x_defconfig
-          echo "# ReSukiSU" >> arch/arm64/configs/g950x_defconfig
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/g950x_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/g950x_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" >> arch/arm64/configs/g950x_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> arch/arm64/configs/g950x_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> arch/arm64/configs/g950x_defconfig
+          {
+            echo ""
+            echo "# ReSukiSU"
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
+            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
+            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
+            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
+          } >> arch/arm64/configs/g950x_defconfig
 
-      - name: Patch Makefile for Modern GCC
+      - name: Neutralize -Werror flags in Makefile
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          # Remove -Werror flags that cause modern GCC to choke on 2016 kernel code
           sed -i 's/-Werror=implicit-int//g' Makefile
           sed -i 's/-Werror=strict-prototypes//g' Makefile
           sed -i 's/-Werror=date-time//g' Makefile
           sed -i 's/-Werror=incompatible-pointer-types//g' Makefile
           sed -i 's/-Werror-implicit-function-declaration//g' Makefile
 
-      - name: Apply Manual Hook - fs/exec.c
+      - name: Apply manual hooks
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
           sed -i '/^static int do_execveat_common(/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
           sed -i 's/\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(\&fd, \&filename, \&argv, \&envp, \&flags, \&retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif/' fs/exec.c
-
-      - name: Apply Manual Hook - fs/stat.c
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
-          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n' fs/stat.c
+          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_pt);\nextern void ksu_handle_fstat64_ret(unsigned int *fd, struct stat64 __user **statbuf_pt);\n#endif' fs/stat.c
           sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
           sed -i '/error = cp_new_stat(\&stat, statbuf);/a #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
-          sed -i '/error = cp_new_stat64(\&stat, statbuf);/a #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
-
-      - name: Apply Manual Hook - fs/open.c
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
           sed -i '/^SYSCALL_DEFINE3(faccessat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n' fs/open.c
           sed -i '/\tif (mode \& ~S_IRWXO)/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif' fs/open.c
-
-      - name: Apply Manual Hook - kernel/reboot.c
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
           sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n' kernel/reboot.c
           sed -i '/\t\/\* We only trust the superuser with rebooting the system\. \*\//i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif' kernel/reboot.c
 
-      - name: Run Build Script (with post-mortem)
+      - name: Build kernel
         run: |
           set -o pipefail
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
-          
           cd $HOME/Samsung_dreamlte_Kernel
-          
-          # Patch build.sh
           chmod +x build.sh
           sed -i 's/\$MODEL_defconfig/${MODEL}_defconfig/g' build.sh
           sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
           sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
-          
-          # Skip merge_config.sh if .config already exists
-          sed -i 's|^ARCH=arm64 scripts/kconfig/merge_config.sh|if [ ! -f .config ]; then ARCH=arm64 scripts/kconfig/merge_config.sh|; s|arch/arm64/configs/${MODEL}_defconfig$|arch/arm64/configs/${MODEL}_defconfig; fi|' build.sh
-
-          # Use system compiler
+          sed -i 's|^ARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig$|if [ ! -f .config ]; then\n\tARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig\nfi|' build.sh
           export CROSS_COMPILE=aarch64-linux-gnu-
-          
-          # Native Makefile hook for extra flags (NO Makefile editing needed)
           export KCFLAGS="-Wno-attribute-alias -Wno-dangling-pointer -Wno-address -Wno-array-bounds -Wno-attributes"
-
-          # Standard kconfig flow: build .config from the model defconfig
-          make ARCH=arm64 ${MODEL}_defconfig
-
-          cd $GITHUB_WORKSPACE
+          if [ "$MODEL" = "g950x" ]; then
+            make ARCH=arm64 g950x_defconfig
+          else
+            ARCH=arm64 scripts/kconfig/merge_config.sh -m arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig || true
+            if [ -f .config ]; then make ARCH=arm64 olddefconfig; else make ARCH=arm64 ${MODEL}_defconfig; fi
+          fi
           ./build.sh || {
             echo "===== POST-MORTEM ====="
             free -h
             df -h $HOME
-            cd $HOME/Samsung_dreamlte_Kernel
             make kernel/built-in.o V=1 2>&1 | tail -40
             exit 1
           }
 
-      - name: Upload Kernel Artifacts
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernel-build-${{ github.event.inputs.model || 'g950x' }}
