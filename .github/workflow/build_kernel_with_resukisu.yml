@@ -1,0 +1,201 @@
+name: Build Kernel with ReSukiSU
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Device Model (g950x, g950x_kor, g955x, g955x_kor, n950x, n950x_kor)'
+        required: true
+        default: 'g950x'
+      branch:
+        description: 'Kernel source branch'
+        required: true
+        default: 'master'
+
+jobs:
+  build-kernel:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip python3 git wget cpio bc
+          
+      - name: Set up Android Image Kitchen (AIK)
+        run: |
+          git clone https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
+          chmod +x $HOME/AIK-Linux/*.sh
+          
+      - name: Clone Kernel Source
+        run: |
+          # Clones your specific S8/Note8 kernel repository
+          git clone --depth 1 -b ${{ github.event.inputs.branch }} https://github.com/Amazeble/Samsung_dreamlte_Kernel.git $HOME/Samsung_dreamlte_Kernel
+          
+      - name: Prepare Build Environment
+        run: |
+          MODEL=${{ github.event.inputs.model }}
+          OUTPUT=$HOME/a2n_kernel_${MODEL}_9.x
+          mkdir -p $OUTPUT/system/lib/modules
+          
+          # Copy flashable zip assets if they exist in your workflow repository
+          if [ -d "$GITHUB_WORKSPACE/META-INF" ]; then cp -r $GITHUB_WORKSPACE/META-INF $OUTPUT/; fi
+          if [ -d "$GITHUB_WORKSPACE/dex2oat_patch" ]; then cp -r $GITHUB_WORKSPACE/dex2oat_patch $OUTPUT/; fi
+          if [ -d "$GITHUB_WORKSPACE/split_img" ]; then cp -r $GITHUB_WORKSPACE/split_img $HOME/AIK-Linux/; fi
+          
+      - name: Integrate ReSukiSU & Apply Manual Hooks
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          
+          # 1. Download and link ReSukiSU source into the kernel tree
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          
+          # 2. Append ReSukiSU configs to your base defconfig
+          echo "# ReSukiSU" >> arch/arm64/configs/g950x_defconfig
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/g950x_defconfig
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/g950x_defconfig
+          
+          # Enable auto-hooks where possible to reduce manual patching needs
+          echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" >> arch/arm64/configs/g950x_defconfig
+          echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> arch/arm64/configs/g950x_defconfig
+          echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> arch/arm64/configs/g950x_defconfig
+          
+          # 3. Inject Manual Hooks for Linux 4.4 (Exynos 8895)
+          cat << 'EOF' > apply_hooks.py
+import os, re
+
+def patch_exec():
+    path = "fs/exec.c"
+    if not os.path.exists(path): return
+    with open(path, "r", encoding="utf-8") as f: c = f.read()
+    if "ksu_handle_execveat" in c: return
+
+    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                void *argv, void *envp, int *flags);
+__attribute__((hot))
+extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                void *argv, void *envp, int *flags, int *retval);
+#endif
+"""
+    c = re.sub(r'(?m)^static int do_execveat_common\(', proto + r'static int do_execveat_common(', c)
+
+    hook1 = """#ifdef CONFIG_KSU_MANUAL_HOOK
+    int retval;
+    ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+    retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
+    ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
+    return retval;
+#else
+    return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+#endif"""
+    c = re.sub(r'(?m)^\s*return __do_execve_file\(fd, filename, argv, envp, flags, NULL\);', hook1, c)
+
+    hook2 = """#ifdef CONFIG_KSU_MANUAL_HOOK
+    int retval;
+    ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+    retval = do_execve_common(fd, filename, argv, envp, flags);
+    ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
+    return retval;
+#else
+    return do_execve_common(fd, filename, argv, envp, flags);
+#endif"""
+    c = re.sub(r'(?m)^\s*return do_execve_common\(fd, filename, argv, envp, flags\);', hook2, c)
+
+    with open(path, "w", encoding="utf-8") as f: f.write(c)
+    print("Patched fs/exec.c")
+
+def patch_stat():
+    path = "fs/stat.c"
+    if not os.path.exists(path): return
+    with open(path, "r", encoding="utf-8") as f: c = f.read()
+    if "ksu_handle_stat" in c: return
+
+    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+#endif
+"""
+    c = re.sub(r'(?m)^SYSCALL_DEFINE4\(newfstatat,', proto + r'SYSCALL_DEFINE4(newfstatat,', c)
+    c = re.sub(r'(?m)^SYSCALL_DEFINE4\(fstatat64,', proto + r'SYSCALL_DEFINE4(fstatat64,', c)
+
+    hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
+    ksu_handle_stat(&dfd, &filename, &flag);
+#endif
+    error = vfs_fstatat(dfd, filename, &stat, flag);"""
+    c = re.sub(r'(?m)^\s*error = vfs_fstatat\(dfd, filename, &stat, flag\);', hook, c)
+
+    with open(path, "w", encoding="utf-8") as f: f.write(c)
+    print("Patched fs/stat.c")
+
+def patch_open():
+    path = "fs/open.c"
+    if not os.path.exists(path): return
+    with open(path, "r", encoding="utf-8") as f: c = f.read()
+    if "ksu_handle_faccessat" in c: return
+
+    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);
+#endif
+"""
+    c = re.sub(r'(?m)^SYSCALL_DEFINE3\(faccessat,', proto + r'SYSCALL_DEFINE3(faccessat,', c)
+
+    hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
+    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+#endif
+    if (mode & ~S_IRWXO)"""
+    c = re.sub(r'(?m)^\s*if \(mode & ~S_IRWXO\)', hook, c)
+
+    with open(path, "w", encoding="utf-8") as f: f.write(c)
+    print("Patched fs/open.c")
+
+def patch_reboot():
+    path = "kernel/reboot.c" if os.path.exists("kernel/reboot.c") else "kernel/sys.c"
+    if not os.path.exists(path): return
+    with open(path, "r", encoding="utf-8") as f: c = f.read()
+    if "ksu_handle_sys_reboot" in c: return
+
+    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
+#endif
+"""
+    c = re.sub(r'(?m)^SYSCALL_DEFINE4\(reboot,', proto + r'SYSCALL_DEFINE4(reboot,', c)
+
+    hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
+    ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+#endif
+    /* We only trust the superuser with rebooting the system. */"""
+    c = re.sub(r'(?m)^\s*/\* We only trust the superuser with rebooting the system\. \*/', hook, c)
+
+    with open(path, "w", encoding="utf-8") as f: f.write(c)
+    print(f"Patched {path}")
+
+patch_exec()
+patch_stat()
+patch_open()
+patch_reboot()
+print("KernelSU Manual Hooks Applied!")
+EOF
+          python3 apply_hooks.py
+          
+      - name: Run Build Script
+        run: |
+          # Ensure the build script is executable
+          chmod +x $GITHUB_WORKSPACE/build.sh
+          # Dynamically update the MODEL variable based on workflow input
+          sed -i "s/^MODEL=.*/MODEL=${{ github.event.inputs.model }}/" $GITHUB_WORKSPACE/build.sh
+          $GITHUB_WORKSPACE/build.sh
+          
+      - name: Upload Kernel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-${{ github.event.inputs.model }}
+          path: |
+            ~/a2n_kernel_${{ github.event.inputs.model }}_9.x/*.zip
+            ~/a2n_kernel_${{ github.event.inputs.model }}_9.x/boot.img
