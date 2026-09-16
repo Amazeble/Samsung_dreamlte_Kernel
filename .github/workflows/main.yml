@@ -1,13 +1,10 @@
-name: Build Kernel with ReSukiSU
+name: ELISE KERNEL (A2N Adaptation)
 
 on:
   push:
-    branches:
-      - main
-      - master
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
       model:
@@ -16,133 +13,223 @@ on:
         default: 'g950x'
 
 jobs:
-  build-kernel:
-    name: Build Kernel
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout Kernel Source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install dependencies and cross-compiler
+      - name: Install Build Dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl xz-utils gcc-aarch64-linux-gnu
+          sudo apt-get install -y bc bison build-essential cpio flex git gcc-aarch64-linux-gnu libssl-dev libelf-dev zip python3 rsync dwarves
 
-      - name: Prepare workspace
+      - name: Vendor in rtw88 (RTL8812AU) driver from NetHunter tree
         run: |
-          ln -sf $GITHUB_WORKSPACE $HOME/Samsung_dreamlte_Kernel
-
-      - name: Integrate ReSukiSU
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-
-      - name: Neutralize -Werror flags in Makefile
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
-          sed -i 's/-Werror=implicit-int//g' Makefile
-          sed -i 's/-Werror=strict-prototypes//g' Makefile
-          sed -i 's/-Werror=date-time//g' Makefile
-          sed -i 's/-Werror=incompatible-pointer-types//g' Makefile
-          sed -i 's/-Werror-implicit-function-declaration//g' Makefile
-
-      - name: Apply ReSukiSU manual hooks
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
+          set -euo pipefail
+          GIT_HOST="https://github.com"
+          DRIVER_PATH="/akabul0us/android_kernel_xiaomi_surya_nethunter.git"
+          git clone --depth=1 --branch rebase-2-electric-boogaloo "${GIT_HOST}${DRIVER_PATH}" /tmp/nethunter
           
-          # 1. fs/exec.c: Hook do_execve and compat_do_execve
-          sed -i '/^int do_execve(struct filename \*filename,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
+          mkdir -p drivers/net/wireless/realtek
+          cp -r /tmp/nethunter/drivers/net/wireless/realtek/rtw88 drivers/net/wireless/realtek/rtw88
+          rm -rf /tmp/nethunter
           
-          sed -i '/struct user_arg_ptr envp = { \.ptr\.native = __envp };/a #ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n\tretval = do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n\tksu_handle_post_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0, \&retval);\n\treturn retval;\n#else' fs/exec.c
-          sed -i '/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/a #endif' fs/exec.c
-
-          sed -i '/^static int compat_do_execve(struct filename \*filename,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
+          # Apply critical patches to rtw88 driver for older kernel compatibility
+          find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/NL80211_SCAN_FLAG_RANDOM_SN/NL80211_SCAN_FLAG_RANDOM_ADDR/g' {} +
+          find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/RX_FLAG_NO_PSDU/0/g' {} +
           
-          sed -i '/\.ptr\.compat = __envp,$/a \t};\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n\tretval = do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n\tksu_handle_post_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0, \&retval);\n\treturn retval;\n#else' fs/exec.c
-          sed -i '/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/{ n; /#endif/!a #endif
-          }' fs/exec.c
-
-          # 2. fs/stat.c: Hook newfstatat, newfstat, fstatat64, and fstat64
-          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n' fs/stat.c
-          sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
-          sed -i '/\treturn cp_new_stat(\&stat, statbuf);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
-          sed -i '/\treturn cp_new_stat64(\&stat, statbuf);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
-
-          # 3. fs/open.c: Hook faccessat
-          sed -i '/^SYSCALL_DEFINE3(faccessat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n' fs/open.c
-          sed -i '/\tif (mode \& ~S_IRWXO)/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif' fs/open.c
-
-          # 4. kernel/reboot.c: Hook reboot
-          sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n' kernel/reboot.c
-          sed -i '/\t\/\* We only trust the superuser with rebooting the system\. \*\//i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif' kernel/reboot.c
-
-      - name: Add ReSukiSU and KALLSYMS configs to defconfig
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
-          {
-            echo ""
-            echo "# ReSukiSU"
-            echo "CONFIG_KALLSYMS=y"
-            echo "CONFIG_KALLSYMS_ALL=y"
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_MANUAL_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
-          } >> arch/arm64/configs/g950x_defconfig
-
-      - name: Build kernel (Raw Image only)
-        run: |
-          set -o pipefail
-          MODEL="${{ github.event.inputs.model || 'g950x' }}"
-          cd $HOME/Samsung_dreamlte_Kernel
-          chmod +x build.sh
-          
-          # 1. Fix bash variable expansion issues in the original build.sh
-          sed -i 's/\$MODEL_defconfig/${MODEL}_defconfig/g' build.sh
-          sed -i 's/\$MODEL_9\.x/${MODEL}_9.x/g' build.sh
-          sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
-          sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
-          
-          # 2. Create output directory for modules
-          mkdir -p $HOME/a2n_kernel_${MODEL}_9.x/system/lib/modules
-          
-          # 3. Make module copying safe (ignore if a .ko like wireguard isn't built)
-          sed -i 's|cp \(.*\.ko\) $OUTPUT/system/lib/modules|cp \1 $OUTPUT/system/lib/modules \&>/dev/null \|\| true|' build.sh
-          
-          # 4. Comment out AIK repacking steps (we are only building the raw kernel)
-          sed -i 's|^cp arch/arm64/boot/Image $AIK/split_img/boot.img-kernel|#&|' build.sh
-          sed -i 's|^\./tools/dtbtool|#&|' build.sh
-          sed -i 's|^cd $AIK/|#&|' build.sh
-          sed -i 's|^\./repackimg\.sh|#&|' build.sh
-          sed -i 's|^cp image-new\.img|#&|' build.sh
-          
-          # 5. Remove boot.img from the final zip command to prevent zip warnings
-          sed -i 's|zip -r a2n_kernel_$MODEL_9.x_user_build.zip META-INF system dex2oat_patch boot.img|zip -r a2n_kernel_$MODEL_9.x_user_build.zip META-INF system dex2oat_patch|' build.sh
-          
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export KCFLAGS="-Wno-attribute-alias -Wno-dangling-pointer -Wno-address -Wno-array-bounds -Wno-attributes"
-          
-          if [ "$MODEL" = "g950x" ]; then
-            make ARCH=arm64 g950x_defconfig
+          # Verify patches were applied
+          if grep -r 'NL80211_SCAN_FLAG_RANDOM_SN' drivers/net/wireless/realtek/rtw88 > /dev/null; then
+            echo "ERROR: SN NOT PATCHED"
+            exit 1
           else
-            ARCH=arm64 scripts/kconfig/merge_config.sh -m arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig || true
-            if [ -f .config ]; then make ARCH=arm64 olddefconfig; else make ARCH=arm64 ${MODEL}_defconfig; fi
+            echo "SN PATCHED OK"
           fi
           
-          ./build.sh || {
-            echo "===== POST-MORTEM ====="
-            free -h
-            df -h $HOME
-            make kernel/built-in.o V=1 2>&1 | tail -40
+          if grep -r 'RX_FLAG_NO_PSDU' drivers/net/wireless/realtek/rtw88 > /dev/null; then
+            echo "ERROR: PSDU NOT PATCHED"
             exit 1
-          }
+          else
+            echo "PSDU PATCHED OK"
+          fi
+          
+          # Add Kconfig and Makefile entries for A2N structure
+          grep -q 'realtek/rtw88/Kconfig' drivers/net/wireless/realtek/Kconfig || \
+            sed -i '/source "drivers\/net\/wireless\/realtek\/rtl8xxxu\/Kconfig"/a source "drivers/net/wireless/realtek/rtw88/Kconfig"' drivers/net/wireless/realtek/Kconfig
+          grep -q 'CONFIG_RTW88' drivers/net/wireless/realtek/Makefile || \
+            echo 'obj-$(CONFIG_RTW88) += rtw88/' >> drivers/net/wireless/realtek/Makefile
 
-      - name: Upload kernel artifacts
+      # --- NoMount Integration Step ---
+      - name: Integrate NoMount into Kernel Source
+        run: |
+          set -euo pipefail
+          echo "Integrating NoMount (dev branch) into kernel source..."
+          curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
+          echo "NoMount integration completed successfully!"
+
+      # --- ReSukiSU Integration Step (Adapted for Non-GKI) ---
+      - name: Integrate ReSukiSU into Kernel Source
+        run: |
+          set -euo pipefail
+          echo "Integrating ReSukiSU into kernel source..."
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          echo "ReSukiSU integration completed successfully!"
+
+      - name: Generate & Force Feature Defconfig
+        run: |
+          set -euo pipefail
+          MODEL="${{ github.event.inputs.model || 'g950x' }}"
+          
+          # Start with the base defconfig for the selected model
+          make ARCH=arm64 ${MODEL}_defconfig
+          
+          # --- KPROBES full dependency chain ---
+          ./scripts/config --enable CONFIG_MODULES
+          ./scripts/config --enable CONFIG_MODULE_UNLOAD
+          ./scripts/config --enable CONFIG_KALLSYMS
+          ./scripts/config --enable CONFIG_KALLSYMS_ALL
+          ./scripts/config --enable CONFIG_TRACING
+          ./scripts/config --enable CONFIG_FTRACE
+          ./scripts/config --enable CONFIG_FTRACE_SYSCALLS
+          ./scripts/config --enable CONFIG_KPROBES
+          ./scripts/config --enable CONFIG_KRETPROBES
+          ./scripts/config --enable CONFIG_KPROBE_EVENTS
+          
+          # --- ReSukiSU / KernelSU Config ---
+          ./scripts/config --enable CONFIG_KSU
+          ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
+          ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
+          ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
+          ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+          
+          # --- Other features ---
+          ./scripts/config --enable CONFIG_EXT4_FS
+          ./scripts/config --enable CONFIG_OVERLAY_FS
+          ./scripts/config --enable CONFIG_PACKET
+          ./scripts/config --enable CONFIG_USB_GADGET
+          ./scripts/config --enable CONFIG_USB_CONFIGFS
+          ./scripts/config --enable CONFIG_USB_LIBCOMPOSITE
+          ./scripts/config --enable CONFIG_USB_CONFIGFS_F_FS
+          ./scripts/config --enable CONFIG_USB_F_FS
+          ./scripts/config --enable CONFIG_USB_CONFIGFS_UEVENT
+          ./scripts/config --enable CONFIG_USB_CONFIGFS_RNDIS
+          ./scripts/config --enable CONFIG_USB_CONFIGFS_MASS_STORAGE
+          ./scripts/config --enable CONFIG_USB_CONFIGFS_F_HID
+          ./scripts/config --enable CONFIG_USB_F_RNDIS
+          ./scripts/config --enable CONFIG_USB_F_MASS_STORAGE
+          ./scripts/config --enable CONFIG_USB_F_HID
+          ./scripts/config --enable CONFIG_BT
+          ./scripts/config --enable CONFIG_BT_HCIBTUSB
+          ./scripts/config --enable CONFIG_BT_HCIBTUSB_BCM
+          ./scripts/config --enable CONFIG_BT_HCIBTUSB_RTL
+          ./scripts/config --enable CONFIG_BT_HCIBTUSB_MTK
+          ./scripts/config --enable CONFIG_CFG80211
+          ./scripts/config --enable CONFIG_MAC80211
+          
+          # --- RTL8812AU Driver ---
+          ./scripts/config --enable CONFIG_RTW88
+          ./scripts/config --enable CONFIG_RTW88_CORE
+          ./scripts/config --enable CONFIG_RTW88_USB
+          ./scripts/config --enable CONFIG_RTW88_8812A
+          ./scripts/config --module CONFIG_RTW88_8812AU
+          
+          # --- NoMount ---
+          ./scripts/config --enable CONFIG_NOMOUNT
+          
+          # Finalize config
+          make ARCH=arm64 olddefconfig
+
+          # --- STRICT VERIFICATION ---
+          echo "=== Verifying Critical Dependencies ==="
+          MISSING=0
+          
+          if ! grep -q "CONFIG_KPROBES=y" .config; then
+            echo "FATAL: CONFIG_KPROBES was dropped by olddefconfig!"
+            MISSING=1
+          fi
+          
+          if ! grep -q "CONFIG_KSU=y" .config; then
+            echo "FATAL: CONFIG_KSU is missing!"
+            MISSING=1
+          fi
+          
+          if ! grep -q "CONFIG_NOMOUNT=y" .config; then
+            echo "WARNING: CONFIG_NOMOUNT is missing!"
+            MISSING=1
+          fi
+          
+          if ! grep -q "CONFIG_RTW88_8812AU=m" .config; then
+            echo "WARNING: CONFIG_RTW88_8812AU module is missing!"
+            MISSING=1
+          fi
+          
+          if [ "$MISSING" -eq 1 ]; then
+            echo ""
+            echo "=== Dumping relevant .config lines for debugging ==="
+            grep -iE "KPROBE|KSU|NOMOUNT|RTW88" .config || true
+            exit 1
+          fi
+          
+          echo "All dependencies verified successfully."
+
+      - name: Build Kernel
+        run: |
+          set -euo pipefail
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export KCFLAGS="-Wno-error -Wno-error=implicit-function-declaration -Wno-error=strict-prototypes"
+          
+          make -j$(nproc --all) ARCH=arm64 Image dtbs modules 2> >(tee log.txt >&2) || exit $?
+          
+          # Install modules to a temporary directory for packaging
+          mkdir -p out/modules
+          make ARCH=arm64 INSTALL_MOD_PATH=out/modules INSTALL_MOD_STRIP=1 modules_install
+
+      - name: Package AnyKernel3 ZIP
+        run: |
+          set -euo pipefail
+          MODEL="${{ github.event.inputs.model || 'g950x' }}"
+          export ZIPNAME="Elise-A2N-${MODEL}-$(date '+%Y%m%d-%H%M').zip"
+          
+          GIT_HOST="https://github.com"
+          AK3_PATH="/osm0sis/AnyKernel3"
+          if ! git clone -q "${GIT_HOST}${AK3_PATH}" AnyKernel3; then
+            echo "Failed to clone AnyKernel3!"
+            exit 1
+          fi
+          
+          # Copy Kernel Image and DTBs
+          cp arch/arm64/boot/Image AnyKernel3/
+          cp arch/arm64/boot/dts/exynos/*.dtb AnyKernel3/ || true
+          
+          # Copy Modules
+          if [ -d "out/modules" ]; then
+            cp -r out/modules/lib/modules/* AnyKernel3/system/lib/modules/
+          fi
+          
+          # Copy Firmware for RTL8812AU if it exists
+          FW_FILE=$(find . -name 'rtw8812a_fw.bin' 2>/dev/null | head -n1)
+          if [ -n "$FW_FILE" ]; then
+            mkdir -p AnyKernel3/vendor/firmware/rtw88
+            cp "$FW_FILE" AnyKernel3/vendor/firmware/rtw88/
+          fi
+          
+          # Update AnyKernel3 properties
+          sed -i "s/device.name1=.*/device.name1=${MODEL}/" AnyKernel3/anykernel.sh
+          sed -i "s/device.name2=.*/device.name2=dreamlte/" AnyKernel3/anykernel.sh
+          
+          cd AnyKernel3
+          zip -r9 "../$ZIPNAME" * -x .git README.md *placeholder
+          cd ..
+          
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+          echo "Completed in $((SECONDS / 60))m $((SECONDS % 60))s - Zip: $ZIPNAME"
+
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-${{ github.event.inputs.model || 'g950x' }}
-          path: |
-            ~/a2n_kernel_*/a2n_kernel_*.zip
-            ~/Samsung_dreamlte_Kernel/arch/arm64/boot/Image
-            ~/Samsung_dreamlte_Kernel/arch/arm64/boot/dts/exynos/*.dtb
+          name: Elise-Kernel-${{ github.event.inputs.model || 'g950x' }}
+          path: ${{ env.ZIPNAME }}
