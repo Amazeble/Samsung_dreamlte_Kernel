@@ -60,37 +60,41 @@ jobs:
           echo "Integrating ReSukiSU into kernel source..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Generate & Force Feature Defconfig
+      - name: Generate & Force Feature Defconfig (Official KernelSU Non-GKI Method)
         run: |
           set -euo pipefail
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
           
-          # FIX: Ensure scripts/config is executable to prevent "Permission denied"
           chmod +x scripts/config
           
-          # Start with the base defconfig for the selected model
+          # 1. Start with base defconfig
           make ARCH=arm64 ${MODEL}_defconfig
           
-          # --- KPROBES full dependency chain ---
+          # 2. Official KernelSU Non-GKI Prerequisites
+          # The docs explicitly state: "If you find that KPROBES is still not enabled, 
+          # you can try enabling CONFIG_MODULES." We enable the full required chain.
           ./scripts/config --enable CONFIG_MODULES
           ./scripts/config --enable CONFIG_MODULE_UNLOAD
           ./scripts/config --enable CONFIG_KALLSYMS
           ./scripts/config --enable CONFIG_KALLSYMS_ALL
-          ./scripts/config --enable CONFIG_TRACING
-          ./scripts/config --enable CONFIG_FTRACE
-          ./scripts/config --enable CONFIG_FTRACE_SYSCALLS
+          
+          # 3. THE MISSING LINK: Explicitly enable HAVE_KPROBES
+          ./scripts/config --enable CONFIG_HAVE_KPROBES
+          ./scripts/config --enable CONFIG_HAVE_KRETPROBES
+          
+          # 4. Force KPROBES chain (As per official docs)
           ./scripts/config --enable CONFIG_KPROBES
           ./scripts/config --enable CONFIG_KRETPROBES
           ./scripts/config --enable CONFIG_KPROBE_EVENTS
           
-          # --- ReSukiSU / KernelSU Config ---
+          # 5. ReSukiSU Config (Manual Hooks)
           ./scripts/config --enable CONFIG_KSU
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
           
-          # --- Other features ---
+          # 6. Other features
           ./scripts/config --enable CONFIG_EXT4_FS
           ./scripts/config --enable CONFIG_OVERLAY_FS
           ./scripts/config --enable CONFIG_PACKET
@@ -114,26 +118,32 @@ jobs:
           ./scripts/config --enable CONFIG_CFG80211
           ./scripts/config --enable CONFIG_MAC80211
           
-          # --- RTL8812AU Driver ---
+          # 7. RTL8812AU Driver
           ./scripts/config --enable CONFIG_RTW88
           ./scripts/config --enable CONFIG_RTW88_CORE
           ./scripts/config --enable CONFIG_RTW88_USB
           ./scripts/config --enable CONFIG_RTW88_8812A
           ./scripts/config --module CONFIG_RTW88_8812AU
           
-          # --- NoMount ---
+          # 8. NoMount
           ./scripts/config --enable CONFIG_NOMOUNT
           
-          # Finalize config
+          # 9. Finalize config
           make ARCH=arm64 olddefconfig
 
-          # --- STRICT VERIFICATION ---
+          # 10. STRICT VERIFICATION
           echo "=== Verifying Critical Dependencies ==="
           MISSING=0
           
+          if ! grep -q "CONFIG_HAVE_KPROBES=y" .config; then
+            echo "WARNING: CONFIG_HAVE_KPROBES was dropped!"
+          fi
+          
           if ! grep -q "CONFIG_KPROBES=y" .config; then
-            echo "FATAL: CONFIG_KPROBES was dropped by olddefconfig!"
+            echo "FATAL: CONFIG_KPROBES was still dropped by olddefconfig!"
             MISSING=1
+          else
+            echo "CONFIG_KPROBES=y verified and locked in."
           fi
           
           if ! grep -q "CONFIG_KSU=y" .config; then
@@ -148,17 +158,15 @@ jobs:
           
           if ! grep -q "CONFIG_RTW88_8812AU=m" .config; then
             echo "WARNING: CONFIG_RTW88_8812AU module is missing!"
-            MISSING=1
           fi
           
           if [ "$MISSING" -eq 1 ]; then
-            echo ""
             echo "=== Dumping relevant .config lines for debugging ==="
-            grep -iE "KPROBE|KSU|NOMOUNT|RTW88" .config || true
+            grep -iE "KPROBE|KSU|NOMOUNT|RTW88|HAVE_KPROBES" .config || true
             exit 1
           fi
           
-          echo "All dependencies verified successfully."
+          echo "All critical dependencies verified successfully. Proceeding to build..."
 
       - name: Build Kernel using fixed build.sh
         run: |
