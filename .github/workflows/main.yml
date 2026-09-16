@@ -61,67 +61,26 @@ jobs:
       - name: Apply Manual Hook - fs/exec.c
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          # Add prototypes before do_execveat_common
-          sed -i '/^static int do_execveat_common(/i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-__attribute__((hot))\
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
-extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\
-#endif\
-' fs/exec.c
-          
-          # Replace return statement with hook version
+          sed -i '/^static int do_execveat_common(/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
           sed -i 's/\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(\&fd, \&filename, \&argv, \&envp, \&flags, \&retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif/' fs/exec.c
           
       - name: Apply Manual Hook - fs/stat.c
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          # Add prototype before newfstatat
-          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-__attribute__((hot))\
-extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
-#endif\
-' fs/stat.c
-          
-          # Add hook call before vfs_fstatat
-          sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-\tksu_handle_stat(\&dfd, \&filename, \&flag);\
-#endif' fs/stat.c
+          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n' fs/stat.c
+          sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
           
       - name: Apply Manual Hook - fs/open.c
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          # Add prototype before faccessat
-          sed -i '/^SYSCALL_DEFINE3(faccessat,/i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-__attribute__((hot))\
-extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
-#endif\
-' fs/open.c
-          
-          # Add hook call before mode check
-          sed -i '/\tif (mode \& ~S_IRWXO)/i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
-#endif' fs/open.c
+          sed -i '/^SYSCALL_DEFINE3(faccessat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n' fs/open.c
+          sed -i '/\tif (mode \& ~S_IRWXO)/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif' fs/open.c
           
       - name: Apply Manual Hook - kernel/reboot.c
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          # Add prototype before reboot syscall
-          sed -i '/^SYSCALL_DEFINE4(reboot,/i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
-#endif\
-' kernel/reboot.c
-          
-          # Add hook call before trust check
-          sed -i '/\t\/\* We only trust the superuser with rebooting the system\. \*\//i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
-#endif' kernel/reboot.c
+          sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n' kernel/reboot.c
+          sed -i '/\t\/\* We only trust the superuser with rebooting the system\. \*\//i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif' kernel/reboot.c
           
       - name: Run Build Script
         run: |
