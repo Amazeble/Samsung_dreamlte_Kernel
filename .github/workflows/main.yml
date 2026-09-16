@@ -31,7 +31,7 @@ jobs:
           
       - name: Set up Android Image Kitchen (AIK)
         run: |
-          git clone https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
+          git clone -b AIK-Linux https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
           chmod +x $HOME/AIK-Linux/*.sh
           
       - name: Prepare Workspace
