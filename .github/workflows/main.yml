@@ -1,7 +1,6 @@
 name: Build Kernel with ReSukiSU
 
 on:
-  # Trigger automatically when you push to main/master
   push:
     branches:
       - main
@@ -9,8 +8,6 @@ on:
     paths-ignore:
       - '**.md'
       - '.gitignore'
-      
-  # Allow manual triggering from the GitHub Actions tab
   workflow_dispatch:
     inputs:
       model:
@@ -30,146 +27,108 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip python3 git wget cpio bc curl
+          sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl
           
       - name: Set up Android Image Kitchen (AIK)
         run: |
           git clone https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
           chmod +x $HOME/AIK-Linux/*.sh
           
-      - name: Prepare Workspace for Build Script
+      - name: Prepare Workspace
         run: |
-          # Your build.sh expects the kernel source in $HOME/Samsung_dreamlte_Kernel
-          # We symlink the current GitHub workspace to that path so it doesn't have to re-clone
           ln -sf $GITHUB_WORKSPACE $HOME/Samsung_dreamlte_Kernel
           
-      - name: Integrate ReSukiSU & Apply Manual Hooks
+      - name: Integrate ReSukiSU
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          
-          # 1. Download and run ReSukiSU setup script
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
           
-          # 2. Add ReSukiSU configs to ALL defconfigs
+      - name: Add ReSukiSU Configs
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
           for defconfig in arch/arm64/configs/*_defconfig; do
             if [ -f "$defconfig" ]; then
               echo "" >> "$defconfig"
               echo "# ReSukiSU" >> "$defconfig"
               echo "CONFIG_KSU=y" >> "$defconfig"
               echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$defconfig"
-              # Enable auto-hooks to avoid manual patching where possible
               echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" >> "$defconfig"
               echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> "$defconfig"
               echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> "$defconfig"
             fi
           done
           
-          # 3. Inject Manual Hooks for Kernel 4.4 (Exynos 8895)
-          cat << 'PYEOF' > apply_hooks.py
-import os, re
-
-def patch_exec():
-    path = "fs/exec.c"
-    if not os.path.exists(path): return
-    with open(path, "r", encoding="utf-8") as f: c = f.read()
-    if "ksu_handle_execveat" in c: return
-    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
-__attribute__((hot))
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);
-extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);
-#endif
-"""
-    c = re.sub(r'(?m)^static int do_execveat_common\(', proto + r'static int do_execveat_common(', c)
-    hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
-    int retval;
-    ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-    retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
-    ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
-    return retval;
-#else
-    return __do_execve_file(fd, filename, argv, envp, flags, NULL);
-#endif"""
-    c = re.sub(r'(?m)^\s*return __do_execve_file\(fd, filename, argv, envp, flags, NULL\);', hook, c)
-    with open(path, "w", encoding="utf-8") as f: f.write(c)
-    print("Patched fs/exec.c")
-
-def patch_stat():
-    path = "fs/stat.c"
-    if not os.path.exists(path): return
-    with open(path, "r", encoding="utf-8") as f: c = f.read()
-    if "ksu_handle_stat" in c: return
-    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
-__attribute__((hot))
-extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
-#endif
-"""
-    c = re.sub(r'(?m)^SYSCALL_DEFINE4\(newfstatat,', proto + r'SYSCALL_DEFINE4(newfstatat,', c)
-    hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
-    ksu_handle_stat(&dfd, &filename, &flag);
-#endif
-    error = vfs_fstatat(dfd, filename, &stat, flag);"""
-    c = re.sub(r'(?m)^\s*error = vfs_fstatat\(dfd, filename, &stat, flag\);', hook, c)
-    with open(path, "w", encoding="utf-8") as f: f.write(c)
-    print("Patched fs/stat.c")
-
-def patch_open():
-    path = "fs/open.c"
-    if not os.path.exists(path): return
-    with open(path, "r", encoding="utf-8") as f: c = f.read()
-    if "ksu_handle_faccessat" in c: return
-    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
-__attribute__((hot))
-extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);
-#endif
-"""
-    c = re.sub(r'(?m)^SYSCALL_DEFINE3\(faccessat,', proto + r'SYSCALL_DEFINE3(faccessat,', c)
-    hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
-    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-#endif
-    if (mode & ~S_IRWXO)"""
-    c = re.sub(r'(?m)^\s*if \(mode & ~S_IRWXO\)', hook, c)
-    with open(path, "w", encoding="utf-8") as f: f.write(c)
-    print("Patched fs/open.c")
-
-def patch_reboot():
-    path = "kernel/reboot.c" if os.path.exists("kernel/reboot.c") else "kernel/sys.c"
-    if not os.path.exists(path): return
-    with open(path, "r", encoding="utf-8") as f: c = f.read()
-    if "ksu_handle_sys_reboot" in c: return
-    proto = """#ifdef CONFIG_KSU_MANUAL_HOOK
-extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
-#endif
-"""
-    c = re.sub(r'(?m)^SYSCALL_DEFINE4\(reboot,', proto + r'SYSCALL_DEFINE4(reboot,', c)
-    hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
-    ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
-#endif
-    /* We only trust the superuser with rebooting the system. */"""
-    c = re.sub(r'(?m)^\s*/\* We only trust the superuser with rebooting the system\. \*/', hook, c)
-    with open(path, "w", encoding="utf-8") as f: f.write(c)
-    print(f"Patched {path}")
-
-patch_exec()
-patch_stat()
-patch_open()
-patch_reboot()
-print("KernelSU Manual Hooks Applied!")
-PYEOF
-          python3 apply_hooks.py
+      - name: Apply Manual Hook - fs/exec.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          # Add prototypes before do_execveat_common
+          sed -i '/^static int do_execveat_common(/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+__attribute__((hot))\
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
+extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\
+#endif\
+' fs/exec.c
+          
+          # Replace return statement with hook version
+          sed -i 's/\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(\&fd, \&filename, \&argv, \&envp, \&flags, \&retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif/' fs/exec.c
+          
+      - name: Apply Manual Hook - fs/stat.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          # Add prototype before newfstatat
+          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+__attribute__((hot))\
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
+#endif\
+' fs/stat.c
+          
+          # Add hook call before vfs_fstatat
+          sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+\tksu_handle_stat(\&dfd, \&filename, \&flag);\
+#endif' fs/stat.c
+          
+      - name: Apply Manual Hook - fs/open.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          # Add prototype before faccessat
+          sed -i '/^SYSCALL_DEFINE3(faccessat,/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+__attribute__((hot))\
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
+#endif\
+' fs/open.c
+          
+          # Add hook call before mode check
+          sed -i '/\tif (mode \& ~S_IRWXO)/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
+#endif' fs/open.c
+          
+      - name: Apply Manual Hook - kernel/reboot.c
+        run: |
+          cd $HOME/Samsung_dreamlte_Kernel
+          # Add prototype before reboot syscall
+          sed -i '/^SYSCALL_DEFINE4(reboot,/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
+#endif\
+' kernel/reboot.c
+          
+          # Add hook call before trust check
+          sed -i '/\t\/\* We only trust the superuser with rebooting the system\. \*\//i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
+#endif' kernel/reboot.c
           
       - name: Run Build Script
         run: |
-          # Determine model (use workflow input if manual, otherwise default to g950x)
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
           chmod +x build.sh
-          
-          # Update MODEL variable in build.sh dynamically
           sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
-          
-          # Fix a common bash trap error with 'rm $DTB' if multiple files exist
           sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
-          
-          # Run the script
           ./build.sh
           
       - name: Upload Kernel Artifacts
