@@ -55,16 +55,15 @@ jobs:
           echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> arch/arm64/configs/g950x_defconfig
           echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> arch/arm64/configs/g950x_defconfig
 
-      - name: Patch Makefile for Modern GCC
+      - name: Patch Makefile for Modern GCC (SAFE: in-line substitutions only)
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          # Remove -Werror flags that cause silent failures on GCC 8+
+          # Remove -Werror flags that cause modern GCC to choke on 2016 kernel code
           sed -i 's/-Werror=implicit-int//g' Makefile
           sed -i 's/-Werror=strict-prototypes//g' Makefile
           sed -i 's/-Werror=date-time//g' Makefile
           sed -i 's/-Werror=incompatible-pointer-types//g' Makefile
-          # Suppress the massive amount of alias warnings from modern GCC
-          sed -i '/^KBUILD_CFLAGS   := -Wall/a KBUILD_CFLAGS += -Wno-attribute-alias' Makefile
+          sed -i 's/-Werror-implicit-function-declaration//g' Makefile
 
       - name: Apply Manual Hook - fs/exec.c
         run: |
@@ -96,16 +95,28 @@ jobs:
         run: |
           set -o pipefail
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
-          chmod +x build.sh
           
-          # Fix the defconfig variable bug in build.sh
+          cd $HOME/Samsung_dreamlte_Kernel
+          
+          # Patch build.sh
+          chmod +x build.sh
           sed -i 's/\$MODEL_defconfig/${MODEL}_defconfig/g' build.sh
           sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
           sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
           
-          # Force the Makefile to use the system compiler
+          # Skip merge_config.sh if .config already exists
+          sed -i 's|^ARCH=arm64 scripts/kconfig/merge_config.sh|if [ ! -f .config ]; then ARCH=arm64 scripts/kconfig/merge_config.sh|; s|arch/arm64/configs/${MODEL}_defconfig$|arch/arm64/configs/${MODEL}_defconfig; fi|' build.sh
+
+          # Use system compiler
           export CROSS_COMPILE=aarch64-linux-gnu-
           
+          # Native Makefile hook for extra flags (NO Makefile editing needed)
+          export KCFLAGS="-Wno-attribute-alias -Wno-dangling-pointer -Wno-address -Wno-array-bounds -Wno-attributes"
+
+          # Standard kconfig flow: build .config from the model defconfig
+          make ARCH=arm64 ${MODEL}_defconfig
+
+          cd $GITHUB_WORKSPACE
           ./build.sh || {
             echo "===== POST-MORTEM ====="
             free -h
