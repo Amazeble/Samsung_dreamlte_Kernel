@@ -28,11 +28,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev zip unzip git wget cpio bc curl xz-utils gcc-aarch64-linux-gnu
 
-      - name: Set up Android Image Kitchen
-        run: |
-          git clone -b AIK-Linux https://github.com/osm0sis/Android-Image-Kitchen.git $HOME/AIK-Linux
-          chmod +x $HOME/AIK-Linux/*.sh
-
       - name: Prepare workspace
         run: |
           ln -sf $GITHUB_WORKSPACE $HOME/Samsung_dreamlte_Kernel
@@ -41,19 +36,6 @@ jobs:
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-
-      - name: Add ReSukiSU configs to master defconfig
-        run: |
-          cd $HOME/Samsung_dreamlte_Kernel
-          {
-            echo ""
-            echo "# ReSukiSU"
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_MANUAL_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
-          } >> arch/arm64/configs/g950x_defconfig
 
       - name: Neutralize -Werror flags in Makefile
         run: |
@@ -64,19 +46,37 @@ jobs:
           sed -i 's/-Werror=incompatible-pointer-types//g' Makefile
           sed -i 's/-Werror-implicit-function-declaration//g' Makefile
 
-      - name: Apply manual hooks
+      - name: Apply ReSukiSU manual hooks
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
-          sed -i '/^static int do_execveat_common(/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
-          sed -i 's/\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(\&fd, \&filename, \&argv, \&envp, \&flags, \&retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif/' fs/exec.c
-          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_pt);\nextern void ksu_handle_fstat64_ret(unsigned int *fd, struct stat64 __user **statbuf_pt);\n#endif' fs/stat.c
+          
+          # 1. fs/exec.c: Hook do_execve and compat_do_execve
+          sed -i '/^int do_execve(struct filename \*filename,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
+          
+          sed -i '/struct user_arg_ptr envp = { \.ptr\.native = __envp };/a #ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n\tretval = do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n\tksu_handle_post_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0, \&retval);\n\treturn retval;\n#else' fs/exec.c
+          sed -i '/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/a #endif' fs/exec.c
+
+          sed -i '/^static int compat_do_execve(struct filename \*filename,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n' fs/exec.c
+          
+          sed -i '/\.ptr\.compat = __envp,$/a \t};\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n\tretval = do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n\tksu_handle_post_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0, \&retval);\n\treturn retval;\n#else' fs/exec.c
+          sed -i '/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/{ n; /#endif/!a #endif
+          }' fs/exec.c
+
+          # 2. fs/stat.c: Hook newfstatat, newfstat, fstatat64, and fstat64
+          sed -i '/^SYSCALL_DEFINE4(newfstatat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n' fs/stat.c
           sed -i '/\terror = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
-          sed -i '/error = cp_new_stat(\&stat, statbuf);/a #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
+          sed -i '/\treturn cp_new_stat(\&stat, statbuf);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
+          sed -i '/\treturn cp_new_stat64(\&stat, statbuf);/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(\&fd, \&statbuf);\n#endif' fs/stat.c
+
+          # 3. fs/open.c: Hook faccessat
           sed -i '/^SYSCALL_DEFINE3(faccessat,/i #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n' fs/open.c
           sed -i '/\tif (mode \& ~S_IRWXO)/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif' fs/open.c
+
+          # 4. kernel/reboot.c: Hook reboot
           sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n' kernel/reboot.c
           sed -i '/\t\/\* We only trust the superuser with rebooting the system\. \*\//i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif' kernel/reboot.c
-      - name: Add ReSukiSU configs to master defconfig
+
+      - name: Add ReSukiSU and KALLSYMS configs to defconfig
         run: |
           cd $HOME/Samsung_dreamlte_Kernel
           {
@@ -90,26 +90,35 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
           } >> arch/arm64/configs/g950x_defconfig
-      - name: Build kernel
+
+      - name: Build kernel (Raw Image only)
         run: |
           set -o pipefail
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
           cd $HOME/Samsung_dreamlte_Kernel
           chmod +x build.sh
           
-          # 1. Fix bash variable expansion issues in build.sh
+          # 1. Fix bash variable expansion issues in the original build.sh
           sed -i 's/\$MODEL_defconfig/${MODEL}_defconfig/g' build.sh
           sed -i 's/\$MODEL_9\.x/${MODEL}_9.x/g' build.sh
-          
-          # 2. Update the MODEL variable to the selected input
           sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
-          
-          # 3. Fix rm command and merge_config logic
           sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
-          sed -i 's|^ARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/\${MODEL}_defconfig$|if [ ! -f .config ]; then\n\tARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig\nfi|' build.sh
           
-          # 4. Create the output directory structure that build.sh expects but doesn't create
+          # 2. Create output directory for modules
           mkdir -p $HOME/a2n_kernel_${MODEL}_9.x/system/lib/modules
+          
+          # 3. Make module copying safe (ignore if a .ko like wireguard isn't built)
+          sed -i 's|cp \(.*\.ko\) $OUTPUT/system/lib/modules|cp \1 $OUTPUT/system/lib/modules \&>/dev/null \|\| true|' build.sh
+          
+          # 4. Comment out AIK repacking steps (we are only building the raw kernel)
+          sed -i 's|^cp arch/arm64/boot/Image $AIK/split_img/boot.img-kernel|#&|' build.sh
+          sed -i 's|^\./tools/dtbtool|#&|' build.sh
+          sed -i 's|^cd $AIK/|#&|' build.sh
+          sed -i 's|^\./repackimg\.sh|#&|' build.sh
+          sed -i 's|^cp image-new\.img|#&|' build.sh
+          
+          # 5. Remove boot.img from the final zip command to prevent zip warnings
+          sed -i 's|zip -r a2n_kernel_$MODEL_9.x_user_build.zip META-INF system dex2oat_patch boot.img|zip -r a2n_kernel_$MODEL_9.x_user_build.zip META-INF system dex2oat_patch|' build.sh
           
           export CROSS_COMPILE=aarch64-linux-gnu-
           export KCFLAGS="-Wno-attribute-alias -Wno-dangling-pointer -Wno-address -Wno-array-bounds -Wno-attributes"
@@ -128,10 +137,12 @@ jobs:
             make kernel/built-in.o V=1 2>&1 | tail -40
             exit 1
           }
+
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernel-build-${{ github.event.inputs.model || 'g950x' }}
           path: |
             ~/a2n_kernel_*/a2n_kernel_*.zip
-            ~/a2n_kernel_*/boot.img
+            ~/Samsung_dreamlte_Kernel/arch/arm64/boot/Image
+            ~/Samsung_dreamlte_Kernel/arch/arm64/boot/dts/exynos/*.dtb
