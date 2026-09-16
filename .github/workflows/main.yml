@@ -90,6 +90,7 @@ jobs:
           chmod +x build.sh
           sed -i "s/^MODEL=.*/MODEL=$MODEL/" build.sh
           sed -i 's/rm \$DTB/rm -f $DTB/' build.sh
+          sed -i 's/make -j\$N/make -j$N KCFLAGS="-Wno-attribute-alias"/' build.sh
           export CROSS_COMPILE=aarch64-linux-gnu-
           ./build.sh
 
