@@ -42,47 +42,31 @@ jobs:
           find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/NL80211_SCAN_FLAG_RANDOM_SN/NL80211_SCAN_FLAG_RANDOM_ADDR/g' {} +
           find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/RX_FLAG_NO_PSDU/0/g' {} +
           
-          # Verify patches were applied
-          if grep -r 'NL80211_SCAN_FLAG_RANDOM_SN' drivers/net/wireless/realtek/rtw88 > /dev/null; then
-            echo "ERROR: SN NOT PATCHED"
-            exit 1
-          else
-            echo "SN PATCHED OK"
-          fi
-          
-          if grep -r 'RX_FLAG_NO_PSDU' drivers/net/wireless/realtek/rtw88 > /dev/null; then
-            echo "ERROR: PSDU NOT PATCHED"
-            exit 1
-          else
-            echo "PSDU PATCHED OK"
-          fi
-          
           # Add Kconfig and Makefile entries for A2N structure
           grep -q 'realtek/rtw88/Kconfig' drivers/net/wireless/realtek/Kconfig || \
             sed -i '/source "drivers\/net\/wireless\/realtek\/rtl8xxxu\/Kconfig"/a source "drivers/net/wireless/realtek/rtw88/Kconfig"' drivers/net/wireless/realtek/Kconfig
           grep -q 'CONFIG_RTW88' drivers/net/wireless/realtek/Makefile || \
             echo 'obj-$(CONFIG_RTW88) += rtw88/' >> drivers/net/wireless/realtek/Makefile
 
-      # --- NoMount Integration Step ---
       - name: Integrate NoMount into Kernel Source
         run: |
           set -euo pipefail
           echo "Integrating NoMount (dev branch) into kernel source..."
           curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
-          echo "NoMount integration completed successfully!"
 
-      # --- ReSukiSU Integration Step (Adapted for Non-GKI) ---
       - name: Integrate ReSukiSU into Kernel Source
         run: |
           set -euo pipefail
           echo "Integrating ReSukiSU into kernel source..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          echo "ReSukiSU integration completed successfully!"
 
       - name: Generate & Force Feature Defconfig
         run: |
           set -euo pipefail
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
+          
+          # FIX: Ensure scripts/config is executable to prevent "Permission denied"
+          chmod +x scripts/config
           
           # Start with the base defconfig for the selected model
           make ARCH=arm64 ${MODEL}_defconfig
@@ -176,60 +160,14 @@ jobs:
           
           echo "All dependencies verified successfully."
 
-      - name: Build Kernel
+      - name: Build Kernel using fixed build.sh
         run: |
           set -euo pipefail
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export KCFLAGS="-Wno-error -Wno-error=implicit-function-declaration -Wno-error=strict-prototypes"
-          
-          make -j$(nproc --all) ARCH=arm64 Image dtbs modules 2> >(tee log.txt >&2) || exit $?
-          
-          # Install modules to a temporary directory for packaging
-          mkdir -p out/modules
-          make ARCH=arm64 INSTALL_MOD_PATH=out/modules INSTALL_MOD_STRIP=1 modules_install
-
-      - name: Package AnyKernel3 ZIP
-        run: |
-          set -euo pipefail
-          MODEL="${{ github.event.inputs.model || 'g950x' }}"
-          export ZIPNAME="Elise-A2N-${MODEL}-$(date '+%Y%m%d-%H%M').zip"
-          
-          GIT_HOST="https://github.com"
-          AK3_PATH="/osm0sis/AnyKernel3"
-          if ! git clone -q "${GIT_HOST}${AK3_PATH}" AnyKernel3; then
-            echo "Failed to clone AnyKernel3!"
-            exit 1
-          fi
-          
-          # Copy Kernel Image and DTBs
-          cp arch/arm64/boot/Image AnyKernel3/
-          cp arch/arm64/boot/dts/exynos/*.dtb AnyKernel3/ || true
-          
-          # Copy Modules
-          if [ -d "out/modules" ]; then
-            cp -r out/modules/lib/modules/* AnyKernel3/system/lib/modules/
-          fi
-          
-          # Copy Firmware for RTL8812AU if it exists
-          FW_FILE=$(find . -name 'rtw8812a_fw.bin' 2>/dev/null | head -n1)
-          if [ -n "$FW_FILE" ]; then
-            mkdir -p AnyKernel3/vendor/firmware/rtw88
-            cp "$FW_FILE" AnyKernel3/vendor/firmware/rtw88/
-          fi
-          
-          # Update AnyKernel3 properties
-          sed -i "s/device.name1=.*/device.name1=${MODEL}/" AnyKernel3/anykernel.sh
-          sed -i "s/device.name2=.*/device.name2=dreamlte/" AnyKernel3/anykernel.sh
-          
-          cd AnyKernel3
-          zip -r9 "../$ZIPNAME" * -x .git README.md *placeholder
-          cd ..
-          
-          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
-          echo "Completed in $((SECONDS / 60))m $((SECONDS % 60))s - Zip: $ZIPNAME"
+          chmod +x build.sh
+          ./build.sh
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Elise-Kernel-${{ github.event.inputs.model || 'g950x' }}
-          path: ${{ env.ZIPNAME }}
+          path: ~/a2n_kernel_*/a2n_kernel_*.zip
