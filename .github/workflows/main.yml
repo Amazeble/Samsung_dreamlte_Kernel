@@ -44,28 +44,28 @@ jobs:
           GIT_HOST="https://github.com"
           DRIVER_PATH="/akabul0us/android_kernel_xiaomi_surya_nethunter.git"
           git clone --depth=1 --branch rebase-2-electric-boogaloo "${GIT_HOST}${DRIVER_PATH}" /tmp/nethunter
-          
+
           mkdir -p drivers/net/wireless/realtek
           cp -r /tmp/nethunter/drivers/net/wireless/realtek/rtw88 drivers/net/wireless/realtek/rtw88
           rm -rf /tmp/nethunter
-          
+
           find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/NL80211_SCAN_FLAG_RANDOM_SN/NL80211_SCAN_FLAG_RANDOM_ADDR/g' {} +
           find drivers/net/wireless/realtek/rtw88 -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/RX_FLAG_NO_PSDU/0/g' {} +
-          
+
           if grep -r 'NL80211_SCAN_FLAG_RANDOM_SN' drivers/net/wireless/realtek/rtw88 > /dev/null; then
             echo "ERROR: SN NOT PATCHED"
             exit 1
           else
             echo "SN PATCHED OK"
           fi
-          
+
           if grep -r 'RX_FLAG_NO_PSDU' drivers/net/wireless/realtek/rtw88 > /dev/null; then
             echo "ERROR: PSDU NOT PATCHED"
             exit 1
           else
             echo "PSDU PATCHED OK"
           fi
-          
+
           echo 'source "drivers/net/wireless/realtek/rtw88/Kconfig"' >> drivers/net/wireless/realtek/Kconfig
           grep -q 'CONFIG_RTW88' drivers/net/wireless/realtek/Makefile || \
             echo 'obj-$(CONFIG_RTW88) += rtw88/' >> drivers/net/wireless/realtek/Makefile
@@ -88,63 +88,65 @@ jobs:
         run: |
           set -euo pipefail
           echo "Applying ReSukiSU Manual Hook patches to kernel source..."
-          
-          cat << 'PYEOF' > patch_manual_hooks.py.tmp
+          echo "Hooks: stat (newfstatat/fstatat64/newfstat/fstat64), execve (do_execveat_common), faccessat, sys_reboot"
+          echo "input/setuid/sys_read hooks are auto-applied via KSU_MANUAL_HOOK_AUTO_* on kernels < 6.8"
+
+          cat << 'PYEOF' > patch_manual_hooks.py
           import os
 
           def patch_file(filepath, search, replace):
               if not os.path.exists(filepath):
                   print(f"Warning: {filepath} not found.")
                   return
-              
+
               with open(filepath, 'r') as f:
                   content = f.read()
-                  
+
               if search in content:
                   content = content.replace(search, replace, 1)
                   with open(filepath, 'w') as f:
                       f.write(content)
                   print(f"Successfully patched {filepath}")
               else:
-                  print(f"Warning: Could not find exact match in {filepath}.")
+                  print(f"Warning: Could not find exact match in {filepath}. Manual patching may be required.")
 
-          # 1. fs/stat.c - newfstatat
-          patch_file("fs/stat.c", 
-              "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
-              "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) \nextern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *flags);\n#endif\n\nSYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);"
-          )
-
-          # fs/stat.c - newfstat
+          # 1. fs/stat.c - extern declarations + newfstatat hook
           patch_file("fs/stat.c",
-              "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n\treturn error;",
-              "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#endif\n\nSYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\treturn error;"
+              "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
+              "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *flags);\n\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); /* optional */\n#endif\n#endif\n\nSYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);"
           )
 
-          # fs/stat.c - fstatat64 (32-bit su)
+          # fs/stat.c - fstatat64 hook (32-bit su)
           patch_file("fs/stat.c",
               "SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
-              "SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);"
+              "SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK /* 32-bit su */\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);"
           )
 
-          # fs/stat.c - fstat64 (32-bit)
+          # fs/stat.c - newfstat return hook
+          patch_file("fs/stat.c",
+              "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n\treturn error;",
+              "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\treturn error;"
+          )
+
+          # fs/stat.c - fstat64 return hook (32-bit)
           patch_file("fs/stat.c",
               "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n\treturn error;",
-              "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;"
+              "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK /* for 32-bit */\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;"
           )
 
-          # 2. fs/exec.c - do_execveat_common
+          # 2. fs/exec.c - do_execveat_common hook (3.14+ pattern)
           patch_file("fs/exec.c",
               "static int do_execveat_common(int fd, struct filename *filename,\n\t\t\t      struct user_arg_ptr argv,\n\t\t\t      struct user_arg_ptr envp,\n\t\t\t      int flags)\n{\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);",
               "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n\t\t\t\tvoid *argv, void *envp, int *flags);\n__attribute__((hot))\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,\n\t\t\t\tvoid *argv, void *envp, int *flags, int *retval);\n#endif\n\nstatic int do_execveat_common(int fd, struct filename *filename,\n\t\t\t      struct user_arg_ptr argv,\n\t\t\t      struct user_arg_ptr envp,\n\t\t\t      int flags)\n{\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif"
           )
 
-          # 3. fs/open.c - faccessat
+          # 3. fs/open.c - faccessat hook
           patch_file("fs/open.c",
               "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n\treturn do_faccessat(dfd, filename, mode);",
-              "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) \nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *mode, int *flags);\n#endif\n\nSYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\treturn do_faccessat(dfd, filename, mode);"
+              "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *mode, int *flags);\n#endif\n\nSYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\treturn do_faccessat(dfd, filename, mode);"
           )
 
-          # 4. kernel/reboot.c - sys_reboot
+          # 4. kernel/reboot.c - sys_reboot hook (3.11+ pattern)
           patch_file("kernel/reboot.c",
               "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{",
               "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\nSYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{"
@@ -155,9 +157,7 @@ jobs:
               "\tchar buffer[256];\n\tint ret = 0;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\t/* We only trust the superuser with rebooting the system. */"
           )
           PYEOF
-          
-          # Strip the 10 spaces of YAML indentation so Python doesn't throw an IndentationError
-          sed 's/^          //' patch_manual_hooks.py.tmp > patch_manual_hooks.py
+
           python3 patch_manual_hooks.py
           echo "Manual hook injection complete."
 
@@ -165,9 +165,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Patching SELinux to remove 'static' from required symbols..."
-          echo "This is mandatory for 4.4 kernels to satisfy static_export_check.mk"
-          
-          cat << 'PYEOF' > patch_selinux.py.tmp
+          echo "Kernel 4.4 has no selinux_state struct, so all 4.17- conditional exports apply."
+          echo "selinux_ops (<=4.2) and 6.6+ exports do not apply to this tree and are skipped."
+
+          cat << 'PYEOF' > patch_selinux.py
           import os
           import re
 
@@ -183,19 +184,20 @@ jobs:
                       f.write(new_content)
                   print(f"Successfully patched {count} occurrence(s) in {filepath}")
               else:
-                  print(f"Warning: Pattern not found in {filepath}.")
+                  print(f"Note: pattern not found in {filepath} (already patched or not present in this tree).")
 
+          # security/selinux/selinuxfs.c - Required exports
           patch_file("security/selinux/selinuxfs.c", r'static\s+ssize_t\s+\(\*write_op\[\]\)', r'ssize_t (*write_op[])')
           patch_file("security/selinux/selinuxfs.c", r'static\s+const\s+struct\s+file_operations\s+sel_handle_status_ops', r'const struct file_operations sel_handle_status_ops')
+          # security/selinux/selinuxfs.c - 4.17- conditional (no selinux_state)
           patch_file("security/selinux/selinuxfs.c", r'static\s+DEFINE_MUTEX\s*\(\s*sel_mutex\s*\)', r'DEFINE_MUTEX(sel_mutex)')
-          patch_file("security/selinux/hooks.c", r'static\s+struct\s+security_operations\s+selinux_ops', r'struct security_operations selinux_ops')
+          # security/selinux/ss/status.c - 4.17- conditional (no selinux_state)
           patch_file("security/selinux/ss/status.c", r'static\s+struct\s+page\s+\*selinux_status_page', r'struct page *selinux_status_page')
           patch_file("security/selinux/ss/status.c", r'static\s+DEFINE_MUTEX\s*\(\s*selinux_status_lock\s*\)', r'DEFINE_MUTEX(selinux_status_lock)')
+          # security/selinux/ss/services.c - 4.17- conditional (no selinux_state)
           patch_file("security/selinux/ss/services.c", r'static\s+DEFINE_RWLOCK\s*\(\s*policy_rwlock\s*\)', r'DEFINE_RWLOCK(policy_rwlock)')
           PYEOF
-          
-          # Strip the 10 spaces of YAML indentation
-          sed 's/^          //' patch_selinux.py.tmp > patch_selinux.py
+
           python3 patch_selinux.py
           echo "SELinux static export patching complete."
 
@@ -203,9 +205,9 @@ jobs:
         run: |
           set -euo pipefail
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
-          
+
           chmod +x scripts/config
-          
+
           export CC=clang
           export LD=ld.lld
           export AS=llvm-as
@@ -218,26 +220,28 @@ jobs:
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-          
+
           # 1. Start with base defconfig
           make ARCH=arm64 ${MODEL}_defconfig
-          
+
           # 2. Core System Prerequisites
           ./scripts/config --enable CONFIG_MODULES
           ./scripts/config --enable CONFIG_MODULE_UNLOAD
-          
-          # CRITICAL: DEBUG_KERNEL must be enabled for KALLSYMS_ALL to survive olddefconfig
+
+          # CRITICAL: DEBUG_KERNEL gates KALLSYMS_ALL. Without it, olddefconfig
+          # silently drops KALLSYMS_ALL and ReSukiSU's static_export_check.mk fails.
           ./scripts/config --enable CONFIG_DEBUG_KERNEL
           ./scripts/config --enable CONFIG_KALLSYMS
           ./scripts/config --enable CONFIG_KALLSYMS_ALL
-          
-          # 3. ReSukiSU Config (MANUAL HOOKS)
+
+          # 3. ReSukiSU Config (MANUAL HOOKS - correct method for kernel 4.4)
           ./scripts/config --enable CONFIG_KSU
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
+          # Auto-hooks via LSM/input_handler (valid for kernels < 6.8)
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
-          
+
           # 4. Other Features
           ./scripts/config --enable CONFIG_KPM
           ./scripts/config --enable CONFIG_EXT4_FS
@@ -262,68 +266,77 @@ jobs:
           ./scripts/config --enable CONFIG_BT_HCIBTUSB_MTK
           ./scripts/config --enable CONFIG_CFG80211
           ./scripts/config --enable CONFIG_MAC80211
-          
+
           # 5. RTL8812AU Driver
           ./scripts/config --enable CONFIG_RTW88
           ./scripts/config --enable CONFIG_RTW88_CORE
           ./scripts/config --enable CONFIG_RTW88_USB
           ./scripts/config --enable CONFIG_RTW88_8812A
           ./scripts/config --module CONFIG_RTW88_8812AU
-          
+
           # 6. NoMount
           ./scripts/config --enable CONFIG_NOMOUNT
-          
+
           # 7. Finalize config
           make ARCH=arm64 olddefconfig
 
           # 8. STRICT VERIFICATION
           echo "=== Verifying Critical Dependencies ==="
           MISSING=0
-          
+
           if ! grep -q "^CONFIG_DEBUG_KERNEL=y" .config; then
-            echo "WARNING: CONFIG_DEBUG_KERNEL is missing! KALLSYMS_ALL might be dropped."
+            echo "WARNING: CONFIG_DEBUG_KERNEL is missing! KALLSYMS_ALL may be dropped."
           fi
-          
+
+          if ! grep -q "^CONFIG_KALLSYMS=y" .config; then
+            echo "FATAL: CONFIG_KALLSYMS is missing!"
+            MISSING=1
+          else
+            echo "CONFIG_KALLSYMS=y verified."
+          fi
+
           if ! grep -q "^CONFIG_KALLSYMS_ALL=y" .config; then
             echo "FATAL: CONFIG_KALLSYMS_ALL was dropped by olddefconfig!"
             MISSING=1
           else
             echo "CONFIG_KALLSYMS_ALL=y verified."
           fi
-          
+
+          if ! grep -q "^CONFIG_KSU=y" .config; then
+            echo "FATAL: CONFIG_KSU is missing!"
+            MISSING=1
+          else
+            echo "CONFIG_KSU=y verified."
+          fi
+
           if ! grep -q "^CONFIG_KSU_MANUAL_HOOK=y" .config; then
             echo "FATAL: CONFIG_KSU_MANUAL_HOOK is missing!"
             MISSING=1
           else
             echo "CONFIG_KSU_MANUAL_HOOK=y verified."
           fi
-          
-          if ! grep -q "^CONFIG_KSU=y" .config; then
-            echo "FATAL: CONFIG_KSU is missing!"
-            MISSING=1
-          fi
-          
+
           if ! grep -q "^CONFIG_NOMOUNT=y" .config; then
             echo "WARNING: CONFIG_NOMOUNT is missing!"
           fi
-          
+
           if ! grep -q "CONFIG_RTW88_8812AU=m" .config; then
             echo "WARNING: CONFIG_RTW88_8812AU module is missing!"
           fi
-          
+
           if [ "$MISSING" -eq 1 ]; then
             echo "=== Dumping relevant .config lines for debugging ==="
             grep -iE "KSU|NOMOUNT|RTW88|MANUAL_HOOK|KALLSYMS|DEBUG_KERNEL" .config || true
             exit 1
           fi
-          
+
           echo "All critical dependencies verified successfully. Proceeding to build..."
 
       - name: Build Kernel using fixed build.sh
         run: |
           set -euo pipefail
           chmod +x build.sh
-          
+
           export CC=clang
           export LD=ld.lld
           export AS=llvm-as
@@ -336,10 +349,14 @@ jobs:
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-          
+
           export KCFLAGS="-Wno-error -Wno-error=implicit-function-declaration -Wno-error=strict-prototypes -Wno-unused-function -Wno-unused-variable -Wno-pointer-sign"
-          
-          ./build.sh
+
+          ./build.sh 2>&1 | tee build.log || {
+            echo "=== FIRST COMPILE ERRORS ==="
+            grep -n -m 30 -E "error:|Error 1" build.log || true
+            exit 1
+          }
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
