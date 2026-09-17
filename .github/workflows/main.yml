@@ -1,3 +1,4 @@
+```yaml
 name: ELISE KERNEL (A2N Adaptation)
 
 on:
@@ -76,38 +77,114 @@ jobs:
         run: |
           set -euo pipefail
           echo "Applying ReSukiSU Manual Hook patches to kernel source..."
-          echo "Hooks: stat (newfstatat/fstatat64/newfstat/fstat64), execve (do_execveat_common), faccessat, sys_reboot"
-          echo "input/setuid/sys_read hooks are auto-applied via KSU_MANUAL_HOOK_AUTO_* on kernels < 6.8"
           cat << 'PYEOF' > patch_manual_hooks.py
           import os
           import sys
+          import re
           
-          def patch_file(filepath, search, replace, is_required=True):
+          def read_file(filepath):
               if not os.path.exists(filepath):
+                  return None
+              with open(filepath, "r", newline="", errors="replace") as f:
+                  return f.read()
+          
+          def write_file(filepath, content):
+              with open(filepath, "w", newline="") as f:
+                  f.write(content)
+          
+          def show_context(filepath, token, radius=300):
+              content = read_file(filepath)
+              if content is None:
+                  return
+              index = content.find(token)
+              if index < 0:
+                  print(f"Token not found: {token}")
+                  return
+              start = max(0, index - radius)
+              end = min(len(content), index + radius)
+              print(f"--- Context around '{token}' in {filepath} ---")
+              print(content[start:end])
+              print("------------------------------------------------")
+          
+          def patch_file(filepath, search, replace, idempotency_check, is_required=True):
+              content = read_file(filepath)
+              if content is None:
                   if is_required:
                       print(f"ERROR: {filepath} not found.")
                       sys.exit(1)
                   print(f"WARNING: {filepath} not found, skipping.")
                   return
                   
-              with open(filepath, 'r') as f:
-                  content = f.read()
+              if idempotency_check in content:
+                  print(f"Already patched {filepath} ({idempotency_check[:30]}...)")
+                  return
                   
               if search in content:
                   content = content.replace(search, replace, 1)
-                  with open(filepath, 'w') as f:
-                      f.write(content)
+                  write_file(filepath, content)
                   print(f"Successfully patched {filepath}")
               else:
                   if is_required:
                       print(f"ERROR: Could not find exact match in {filepath}.")
+                      token = search.split('\n')[0].strip()
+                      show_context(filepath, token)
                       sys.exit(1)
                   print(f"WARNING: Could not find exact match in {filepath}, skipping.")
-                  
+          
+          def regex_patch_file(filepath, pattern, replacement, idempotency_check, is_required=True):
+              content = read_file(filepath)
+              if content is None:
+                  if is_required:
+                      print(f"ERROR: {filepath} not found.")
+                      sys.exit(1)
+                  print(f"WARNING: {filepath} not found, skipping.")
+                  return False
+          
+              if idempotency_check in content:
+                  print(f"Already patched {filepath}")
+                  return True
+          
+              updated, count = re.subn(
+                  pattern,
+                  replacement,
+                  content,
+                  count=1,
+                  flags=re.MULTILINE | re.DOTALL,
+              )
+          
+              print(f"{filepath}: regex matches={count}")
+          
+              if count != 1:
+                  if is_required:
+                      print(f"ERROR: expected exactly one match in {filepath}, got {count}")
+                      sys.exit(1)
+                  print(f"WARNING: skipping {filepath}")
+                  return False
+          
+              write_file(filepath, updated)
+              print(f"Successfully regex-patched {filepath}")
+              return True
+          
+          stat_source = read_file("fs/stat.c")
+          if not stat_source:
+              print("ERROR: fs/stat.c missing during preflight!")
+              sys.exit(1)
+              
+          print("=== fs/stat.c newfstat candidates ===")
+          for match in re.finditer(
+              r"SYSCALL_DEFINE2\s*\(\s*newfstat\b.*?"
+              r"return\s+error\s*;",
+              stat_source,
+              flags=re.MULTILINE | re.DOTALL,
+          ):
+              print(match.group(0))
+          print("======================================")
+          
           # 1. fs/stat.c - extern declarations + newfstatat hook (64-bit - REQUIRED)
           patch_file("fs/stat.c",
               "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
               "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *flags);\n\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); /* optional */\n#endif\n#endif\n\nSYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
+              idempotency_check="ksu_handle_stat(&dfd, &filename, &flag);",
               is_required=True
           )
           
@@ -115,13 +192,26 @@ jobs:
           patch_file("fs/stat.c",
               "SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
               "SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK /* 32-bit su */\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
+              idempotency_check="/* 32-bit su */\n\tksu_handle_stat(&dfd, &filename, &flag);",
               is_required=False
           )
           
-          # fs/stat.c - newfstat return hook (64-bit - REQUIRED)
-          patch_file("fs/stat.c",
-              "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n\treturn error;",
-              "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\treturn error;",
+          # fs/stat.c - newfstat return hook (64-bit - REQUIRED, REGEX-BASED)
+          regex_patch_file(
+              "fs/stat.c",
+              r"SYSCALL_DEFINE2\s*\(\s*newfstat\s*,\s*"
+              r"unsigned\s+int\s*,\s*fd\s*,\s*"
+              r"struct\s+stat\s+__user\s*\*\s*,\s*statbuf\s*"
+              r"\)\s*\{"
+              r".*?"
+              r"if\s*\(\s*!error\s*\)\s*"
+              r"error\s*=\s*cp_new_stat\s*\(\s*&stat\s*,\s*statbuf\s*\)\s*;"
+              r"(?P<return_line>\s*return\s+error\s*;)",
+              r"""#ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_newfstat_ret(&fd, &statbuf);
+          #endif
+          \g<return_line>""",
+              idempotency_check="ksu_handle_newfstat_ret(&fd, &statbuf);",
               is_required=True
           )
           
@@ -129,6 +219,7 @@ jobs:
           patch_file("fs/stat.c",
               "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n\treturn error;",
               "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK /* for 32-bit */\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;",
+              idempotency_check="ksu_handle_fstat64_ret(&fd, &statbuf);",
               is_required=False
           )
           
@@ -136,6 +227,7 @@ jobs:
           patch_file("fs/exec.c",
               "static int do_execveat_common(int fd, struct filename *filename,\n\t\t\t      struct user_arg_ptr argv,\n\t\t\t      struct user_arg_ptr envp,\n\t\t\t      int flags)\n{\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);",
               "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n\t\t\t\tvoid *argv, void *envp, int *flags);\n__attribute__((hot))\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,\n\t\t\t\tvoid *argv, void *envp, int *flags, int *retval);\n#endif\n\nstatic int do_execveat_common(int fd, struct filename *filename,\n\t\t\t      struct user_arg_ptr argv,\n\t\t\t      struct user_arg_ptr envp,\n\t\t\t      int flags)\n{\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif",
+              idempotency_check="ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
               is_required=True
           )
           
@@ -143,6 +235,7 @@ jobs:
           patch_file("fs/open.c",
               "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n\treturn do_faccessat(dfd, filename, mode);",
               "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *mode, int *flags);\n#endif\n\nSYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\treturn do_faccessat(dfd, filename, mode);",
+              idempotency_check="ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
               is_required=True
           )
           
@@ -150,11 +243,13 @@ jobs:
           patch_file("kernel/reboot.c",
               "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{",
               "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\nSYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{",
+              idempotency_check="extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);",
               is_required=True
           )
           patch_file("kernel/reboot.c",
               "\tchar buffer[256];\n\tint ret = 0;\n\n\t/* We only trust the superuser with rebooting the system. */",
               "\tchar buffer[256];\n\tint ret = 0;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\t/* We only trust the superuser with rebooting the system. */",
+              idempotency_check="ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
               is_required=True
           )
           PYEOF
@@ -165,40 +260,59 @@ jobs:
         run: |
           set -euo pipefail
           echo "Patching SELinux to remove 'static' from required symbols..."
-          echo "Kernel 4.4 has no selinux_state struct, so all 4.17- conditional exports apply."
-          echo "selinux_ops (<=4.2) and 6.6+ exports do not apply to this tree and are skipped."
           cat << 'PYEOF' > patch_selinux.py
           import os
           import re
           import sys
           
-          def patch_file(filepath, pattern, replace, is_required=False):
+          def read_file(filepath):
               if not os.path.exists(filepath):
+                  return None
+              with open(filepath, "r", newline="", errors="replace") as f:
+                  return f.read()
+          
+          def write_file(filepath, content):
+              with open(filepath, "w", newline="") as f:
+                  f.write(content)
+          
+          def patch_file(filepath, pattern, replace, marker=None):
+              content = read_file(filepath)
+          
+              if content is None:
                   print(f"WARNING: {filepath} not found, skipping.")
                   return
-              with open(filepath, 'r') as f:
-                  content = f.read()
-              new_content, count = re.subn(pattern, replace, content)
-              if count > 0:
-                  with open(filepath, 'w') as f:
-                      f.write(new_content)
+          
+              if marker and marker in content:
+                  print(f"Already patched {filepath}")
+                  return
+          
+              updated, count = re.subn(pattern, replace, content)
+          
+              if count:
+                  write_file(filepath, updated)
                   print(f"Successfully patched {count} occurrence(s) in {filepath}")
               else:
                   print(f"WARNING: pattern not found in {filepath}, skipping.")
                   
-          # security/selinux/selinuxfs.c - Required exports
-          patch_file("security/selinux/selinuxfs.c", r'static\s+ssize_t\s+\(\*write_op\[\]\)', r'ssize_t (*write_op[])')
-          patch_file("security/selinux/selinuxfs.c", r'static\s+const\s+struct\s+file_operations\s+sel_handle_status_ops', r'const struct file_operations sel_handle_status_ops')
-          # security/selinux/selinuxfs.c - 4.17- conditional (no selinux_state)
-          patch_file("security/selinux/selinuxfs.c", r'static\s+DEFINE_MUTEX\s*\(\s*sel_mutex\s*\)', r'DEFINE_MUTEX(sel_mutex)')
-          # security/selinux/ss/status.c - 4.17- conditional (no selinux_state)
-          patch_file("security/selinux/ss/status.c", r'static\s+struct\s+page\s+\*selinux_status_page', r'struct page *selinux_status_page')
-          patch_file("security/selinux/ss/status.c", r'static\s+DEFINE_MUTEX\s*\(\s*selinux_status_lock\s*\)', r'DEFINE_MUTEX(selinux_status_lock)')
-          # security/selinux/ss/services.c - 4.17- conditional (no selinux_state)
-          patch_file("security/selinux/ss/services.c", r'static\s+DEFINE_RWLOCK\s*\(\s*policy_rwlock\s*\)', r'DEFINE_RWLOCK(policy_rwlock)')
+          patch_file("security/selinux/selinuxfs.c", r'static\s+ssize_t\s+\(\*write_op\[\]\)', r'ssize_t (*write_op[])', marker="ssize_t (*write_op[])")
+          patch_file("security/selinux/selinuxfs.c", r'static\s+const\s+struct\s+file_operations\s+sel_handle_status_ops', r'const struct file_operations sel_handle_status_ops', marker="const struct file_operations sel_handle_status_ops")
+          patch_file("security/selinux/selinuxfs.c", r'static\s+DEFINE_MUTEX\s*\(\s*sel_mutex\s*\)', r'DEFINE_MUTEX(sel_mutex)', marker="DEFINE_MUTEX(sel_mutex)")
+          patch_file("security/selinux/ss/status.c", r'static\s+struct\s+page\s+\*selinux_status_page', r'struct page *selinux_status_page', marker="struct page *selinux_status_page")
+          patch_file("security/selinux/ss/status.c", r'static\s+DEFINE_MUTEX\s*\(\s*selinux_status_lock\s*\)', r'DEFINE_MUTEX(selinux_status_lock)', marker="DEFINE_MUTEX(selinux_status_lock)")
+          patch_file("security/selinux/ss/services.c", r'static\s+DEFINE_RWLOCK\s*\(\s*policy_rwlock\s*\)', r'DEFINE_RWLOCK(policy_rwlock)', marker="DEFINE_RWLOCK(policy_rwlock)")
           PYEOF
           python3 patch_selinux.py
           echo "SELinux static export patching complete."
+          
+      - name: Verify ReSukiSU Hook Declarations
+        run: |
+          set -euo pipefail
+          echo "=== Verifying ReSukiSU handler declarations ==="
+          grep -R "ksu_handle_faccessat" -n . --exclude-dir=.git || echo "WARNING: ksu_handle_faccessat not found"
+          grep -R "ksu_handle_newfstat_ret" -n . --exclude-dir=.git || echo "WARNING: ksu_handle_newfstat_ret not found"
+          grep -R "ksu_handle_execveat" -n . --exclude-dir=.git || echo "WARNING: ksu_handle_execveat not found"
+          grep -R "ksu_handle_sys_reboot" -n . --exclude-dir=.git || echo "WARNING: ksu_handle_sys_reboot not found"
+          echo "=== Verification complete ==="
           
       - name: Generate & Force Feature Defconfig
         run: |
@@ -218,27 +332,20 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
           
-          # 1. Start with base defconfig
           make ARCH=arm64 ${MODEL}_defconfig
           
-          # 2. Core System Prerequisites
           ./scripts/config --enable CONFIG_MODULES
           ./scripts/config --enable CONFIG_MODULE_UNLOAD
-          # CRITICAL: DEBUG_KERNEL gates KALLSYMS_ALL. Without it, olddefconfig
-          # silently drops KALLSYMS_ALL and ReSukiSU's static_export_check.mk fails.
           ./scripts/config --enable CONFIG_DEBUG_KERNEL
           ./scripts/config --enable CONFIG_KALLSYMS
           ./scripts/config --enable CONFIG_KALLSYMS_ALL
           
-          # 3. ReSukiSU Config (MANUAL HOOKS - correct method for kernel 4.4)
           ./scripts/config --enable CONFIG_KSU
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
-          # Auto-hooks via LSM/input_handler (valid for kernels < 6.8)
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
           
-          # 4. Other Features
           ./scripts/config --enable CONFIG_KPM
           ./scripts/config --enable CONFIG_EXT4_FS
           ./scripts/config --enable CONFIG_OVERLAY_FS
@@ -263,17 +370,14 @@ jobs:
           ./scripts/config --enable CONFIG_CFG80211
           ./scripts/config --enable CONFIG_MAC80211
           
-          # 5. RTL8812AU Driver
           ./scripts/config --enable CONFIG_RTW88
           ./scripts/config --enable CONFIG_RTW88_CORE
           ./scripts/config --enable CONFIG_RTW88_USB
           ./scripts/config --enable CONFIG_RTW88_8812A
           ./scripts/config --module CONFIG_RTW88_8812AU
           
-          # 7. Finalize config
           make ARCH=arm64 olddefconfig
           
-          # 8. STRICT VERIFICATION
           echo "=== Verifying Critical Dependencies ==="
           MISSING=0
           if ! grep -q "^CONFIG_DEBUG_KERNEL=y" .config; then
@@ -330,7 +434,6 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
           
-          # Suppressed Clang 15/16/17 strict C standard errors that break old kernel macros
           export KCFLAGS="-Wno-error -Wno-error=implicit-function-declaration -Wno-error=strict-prototypes -Wno-error=incompatible-function-pointer-types -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int -Wno-unused-function -Wno-unused-variable -Wno-pointer-sign"
           
           ./build.sh 2>&1 | tee build.log || {
@@ -344,3 +447,4 @@ jobs:
         with:
           name: Elise-Kernel-${{ github.event.inputs.model || 'g950x' }}
           path: ~/a2n_kernel_*/a2n_kernel_*.zip
+```
