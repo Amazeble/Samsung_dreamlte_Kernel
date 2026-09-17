@@ -1,4 +1,4 @@
-```yaml
+
 name: ELISE KERNEL (A2N Adaptation)
 
 on:
@@ -447,4 +447,3 @@ jobs:
         with:
           name: Elise-Kernel-${{ github.event.inputs.model || 'g950x' }}
           path: ~/a2n_kernel_*/a2n_kernel_*.zip
-```
