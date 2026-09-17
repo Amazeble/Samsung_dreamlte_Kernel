@@ -69,14 +69,7 @@ jobs:
           echo 'source "drivers/net/wireless/realtek/rtw88/Kconfig"' >> drivers/net/wireless/realtek/Kconfig
           grep -q 'CONFIG_RTW88' drivers/net/wireless/realtek/Makefile || \
             echo 'obj-$(CONFIG_RTW88) += rtw88/' >> drivers/net/wireless/realtek/Makefile
-
-      - name: Integrate NoMount into Kernel Source
-        run: |
-          set -euo pipefail
-          echo "Integrating NoMount (dev branch) into kernel source..."
-          curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
-          echo "NoMount integration completed successfully!"
-
+            
       - name: Integrate ReSukiSU into Kernel Source
         run: |
           set -euo pipefail
@@ -274,9 +267,6 @@ jobs:
           ./scripts/config --enable CONFIG_RTW88_8812A
           ./scripts/config --module CONFIG_RTW88_8812AU
 
-          # 6. NoMount
-          ./scripts/config --enable CONFIG_NOMOUNT
-
           # 7. Finalize config
           make ARCH=arm64 olddefconfig
 
@@ -316,17 +306,13 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK=y verified."
           fi
 
-          if ! grep -q "^CONFIG_NOMOUNT=y" .config; then
-            echo "WARNING: CONFIG_NOMOUNT is missing!"
-          fi
-
           if ! grep -q "CONFIG_RTW88_8812AU=m" .config; then
             echo "WARNING: CONFIG_RTW88_8812AU module is missing!"
           fi
 
           if [ "$MISSING" -eq 1 ]; then
             echo "=== Dumping relevant .config lines for debugging ==="
-            grep -iE "KSU|NOMOUNT|RTW88|MANUAL_HOOK|KALLSYMS|DEBUG_KERNEL" .config || true
+            grep -iE "KSU|RTW88|MANUAL_HOOK|KALLSYMS|DEBUG_KERNEL" .config || true
             exit 1
           fi
 
