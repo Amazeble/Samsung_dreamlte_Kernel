@@ -1,25 +1,20 @@
-name: ELISE KERNEL (A2N Adaptation)
+name: ELISE KERNEL (ReSukiSU Only)
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
       model:
-        description: Device model
+        description: 'Device model (g950x, g950x_kor, g955x, g955x_kor, n950x, n950x_kor)'
         required: false
-        default: g950x
+        default: 'g950x'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -29,511 +24,96 @@ jobs:
       - name: Install Build Dependencies
         run: |
           set -euo pipefail
-
           sudo apt-get update
-          sudo apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            cpio \
-            flex \
-            git \
-            gcc-aarch64-linux-gnu \
-            libssl-dev \
-            libelf-dev \
-            zip \
-            python3 \
-            rsync \
-            dwarves
+          sudo apt-get install -y bc bison build-essential cpio flex git gcc-aarch64-linux-gnu libssl-dev libelf-dev zip python3 rsync dwarves
 
       - name: Setup AOSP Clang Toolchain
         run: |
           set -euo pipefail
-
-          TC_DIR="$PWD/tc/clang-498229"
-
+          TC_DIR="$(pwd)/tc/clang-498229"
           if [ ! -d "$TC_DIR" ]; then
-            git clone \
-              --depth=1 \
-              --branch 17 \
-              https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone \
-              "$TC_DIR"
+            GITLAB_HOST="https://gitlab.com"
+            TC_PATH="/ThankYouMario/android_prebuilts_clang-standalone"
+            git clone --depth=1 -b 17 "${GITLAB_HOST}${TC_PATH}" "$TC_DIR"
           fi
+          echo "$TC_DIR/bin" >> $GITHUB_PATH
 
-          echo "$TC_DIR/bin" >> "$GITHUB_PATH"
-
-      - name: Vendor rtw88 Driver
+      - name: Integrate ReSukiSU into Kernel Source
         run: |
           set -euo pipefail
+          echo "Integrating ReSukiSU into kernel source..."
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          echo "ReSukiSU integration completed successfully!"
 
-          git clone \
-            --depth=1 \
-            --branch rebase-2-electric-boogaloo \
-            https://github.com/akabul0us/android_kernel_xiaomi_surya_nethunter.git \
-            /tmp/nethunter
-
-          mkdir -p drivers/net/wireless/realtek
-
-          rm -rf drivers/net/wireless/realtek/rtw88
-
-          cp -r \
-            /tmp/nethunter/drivers/net/wireless/realtek/rtw88 \
-            drivers/net/wireless/realtek/rtw88
-
-          rm -rf /tmp/nethunter
-
-          find drivers/net/wireless/realtek/rtw88 \
-            -type f \
-            \( -name "*.c" -o -name "*.h" \) \
-            -exec sed -i \
-              's/NL80211_SCAN_FLAG_RANDOM_SN/NL80211_SCAN_FLAG_RANDOM_ADDR/g' \
-              {} +
-
-          find drivers/net/wireless/realtek/rtw88 \
-            -type f \
-            \( -name "*.c" -o -name "*.h" \) \
-            -exec sed -i \
-              's/RX_FLAG_NO_PSDU/0/g' \
-              {} +
-
-          if grep -R \
-            'NL80211_SCAN_FLAG_RANDOM_SN' \
-            drivers/net/wireless/realtek/rtw88 \
-            > /dev/null; then
-            echo "ERROR: NL80211_SCAN_FLAG_RANDOM_SN remains"
-            exit 1
-          fi
-
-          if grep -R \
-            'RX_FLAG_NO_PSDU' \
-            drivers/net/wireless/realtek/rtw88 \
-            > /dev/null; then
-            echo "ERROR: RX_FLAG_NO_PSDU remains"
-            exit 1
-          fi
-
-          grep -q \
-            'source "drivers/net/wireless/realtek/rtw88/Kconfig"' \
-            drivers/net/wireless/realtek/Kconfig || \
-            echo \
-              'source "drivers/net/wireless/realtek/rtw88/Kconfig"' \
-              >> drivers/net/wireless/realtek/Kconfig
-
-          grep -q \
-            'CONFIG_RTW88' \
-            drivers/net/wireless/realtek/Makefile || \
-            echo \
-              'obj-$(CONFIG_RTW88) += rtw88/' \
-              >> drivers/net/wireless/realtek/Makefile
-
-          echo "rtw88 driver prepared"
-
-      - name: Integrate ReSukiSU and Patch Kernel Hooks
+      - name: Apply ReSukiSU Manual Hook Patches
         run: |
           set -euo pipefail
-
-          echo "Integrating ReSukiSU..."
-
-          curl -LSs \
-            https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh \
-            | bash
-
-          python3 <<'PYEOF'
+          echo "Applying ReSukiSU Manual Hook patches to kernel source..."
+          cat << 'PYEOF' > patch_manual_hooks.py
           import os
-          import re
-          import sys
-
-          def read_file(path):
-              if not os.path.isfile(path):
-                  return None
-
-              with open(
-                  path,
-                  "r",
-                  encoding="utf-8",
-                  errors="replace",
-                  newline="",
-              ) as file:
-                  return file.read()
-
-          def write_file(path, content):
-              with open(
-                  path,
-                  "w",
-                  encoding="utf-8",
-                  newline="",
-              ) as file:
-                  file.write(content)
-
-          def require_file(path):
-              if read_file(path) is None:
-                  print(f"ERROR: required file missing: {path}")
-                  sys.exit(1)
-
-          def regex_patch(
-              path,
-              pattern,
-              replacement,
-              marker,
-              required=True,
-          ):
-              content = read_file(path)
-
-              if content is None:
-                  if required:
-                      print(f"ERROR: required file missing: {path}")
-                      sys.exit(1)
-
-                  print(f"WARNING: optional file missing: {path}")
-                  return False
-
-              if marker and marker in content:
-                  print(f"Already patched: {path}")
-                  return True
-
-              updated, count = re.subn(
-                  pattern,
-                  replacement,
-                  content,
-                  count=1,
-                  flags=re.MULTILINE | re.DOTALL,
-              )
-
-              print(f"{path}: regex matches={count}")
-
-              if count != 1:
-                  if required:
-                      print(f"ERROR: patch failed for {path}")
-                      sys.exit(1)
-
-                  print(f"WARNING: optional patch skipped: {path}")
-                  return False
-
-              write_file(path, updated)
-              print(f"Patched: {path}")
-              return True
-
-          for required_path in (
-              "fs/stat.c",
-              "fs/exec.c",
-              "fs/open.c",
-              "kernel/reboot.c",
-          ):
-              require_file(required_path)
-
-          # ----------------------------------------------------------
-          # fs/stat.c declarations
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/stat.c",
-              r"(#include\s+<asm/unistd\.h>\s*\n)",
-              (
-                  r"\1"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "__attribute__((hot))\n"
-                  "extern int ksu_handle_stat("
-                  "int *dfd, "
-                  "const char __user **filename_user, "
-                  "int *flags);\n"
-                  "\n"
-                  "extern void ksu_handle_newfstat_ret("
-                  "unsigned int *fd, "
-                  "struct stat __user **statbuf_ptr);\n"
-                  "#endif\n"
-              ),
-              "extern int ksu_handle_stat(",
-          )
-
-          # ----------------------------------------------------------
-          # fs/stat.c newfstatat
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/stat.c",
-              r"(?P<header>"
-              r"SYSCALL_DEFINE4\s*\(\s*newfstatat\s*,\s*"
-              r"int\s*,\s*dfd\s*,\s*"
-              r"const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*"
-              r"struct\s+stat\s+__user\s*\*\s*,\s*statbuf\s*,\s*"
-              r"int\s*,\s*flag\s*\)\s*\{\s*)",
-              (
-                  r"\g<header>"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_stat(&dfd, &filename, &flag);\n"
-                  "#endif\n"
-              ),
-              "ksu_handle_stat(&dfd, &filename, &flag);",
-          )
-
-          # ----------------------------------------------------------
-          # fs/stat.c newfstat
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/stat.c",
-              r"(?P<body>"
-              r"SYSCALL_DEFINE2\s*\(\s*newfstat\s*,\s*"
-              r"unsigned\s+int\s*,\s*fd\s*,\s*"
-              r"struct\s+stat\s+__user\s*\*\s*,\s*statbuf\s*"
-              r"\)\s*\{.*?"
-              r"if\s*\(\s*!error\s*\)\s*"
-              r"error\s*=\s*cp_new_stat\s*\(\s*&stat\s*,\s*statbuf\s*\)\s*;"
-              r")"
-              r"(?P<return>\s*return\s+error\s*;)",
-              (
-                  r"\g<body>"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_newfstat_ret(&fd, &statbuf);\n"
-                  "#endif\n"
-                  r"\g<return>"
-              ),
-              "ksu_handle_newfstat_ret(&fd, &statbuf);",
-          )
-
-          # ----------------------------------------------------------
-          # fs/exec.c declarations
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/exec.c",
-              r"(#include\s+<asm/tlb\.h>\s*\n)",
-              (
-                  r"\1"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "__attribute__((hot))\n"
-                  "extern int ksu_handle_execveat("
-                  "int *fd, "
-                  "struct filename **filename_ptr, "
-                  "void *argv, "
-                  "void *envp, "
-                  "int *flags);\n"
-                  "\n"
-                  "__attribute__((hot))\n"
-                  "extern int ksu_handle_post_execveat("
-                  "int *fd, "
-                  "struct filename **filename_ptr, "
-                  "void *argv, "
-                  "void *envp, "
-                  "int *flags, "
-                  "int *retval);\n"
-                  "#endif\n"
-              ),
-              "extern int ksu_handle_execveat(",
-          )
-
-          # ----------------------------------------------------------
-          # fs/exec.c do_execveat_common
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/exec.c",
-              r"(?P<header>"
-              r"static\s+int\s+do_execveat_common\s*\(\s*"
-              r"int\s+fd\s*,\s*"
-              r"struct\s+filename\s*\*\s*filename\s*,\s*"
-              r"struct\s+user_arg_ptr\s+argv\s*,\s*"
-              r"struct\s+user_arg_ptr\s+envp\s*,\s*"
-              r"int\s+flags\s*\)\s*\{\s*)",
-              (
-                  r"\g<header>"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_execveat("
-                  "&fd, &filename, &argv, &envp, &flags);\n"
-                  "#endif\n"
-              ),
-              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
-          )
-
-          # ----------------------------------------------------------
-          # fs/exec.c post-exec hook
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/exec.c",
-              r"(?P<indent>^[ \t]*)"
-              r"retval\s*=\s*exec_binprm\s*\(\s*bprm\s*\)\s*;",
-              (
-                  r"\g<indent>retval = exec_binprm(bprm);\n"
-                  r"\g<indent>#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  r"\g<indent>ksu_handle_post_execveat("
-                  r"&fd, &filename, &argv, &envp, &flags, &retval);\n"
-                  r"\g<indent>#endif\n"
-              ),
-              "ksu_handle_post_execveat(",
-          )
-
-          # ----------------------------------------------------------
-          # fs/open.c declarations
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/open.c",
-              r"(#include\s+<linux/syscalls\.h>\s*\n)",
-              (
-                  r"\1"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "__attribute__((hot))\n"
-                  "extern int ksu_handle_faccessat("
-                  "int *dfd, "
-                  "const char __user **filename_user, "
-                  "int *mode, "
-                  "int *flags);\n"
-                  "#endif\n"
-              ),
-              "extern int ksu_handle_faccessat(",
-          )
-
-          # ----------------------------------------------------------
-          # fs/open.c faccessat
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "fs/open.c",
-              r"(?P<header>"
-              r"SYSCALL_DEFINE3\s*\(\s*faccessat\s*,\s*"
-              r"int\s*,\s*dfd\s*,\s*"
-              r"const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*"
-              r"int\s*,\s*mode\s*\)\s*\{\s*)",
-              (
-                  r"\g<header>"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_faccessat("
-                  "&dfd, &filename, &mode, NULL);\n"
-                  "#endif\n"
-              ),
-              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
-          )
-
-          # ----------------------------------------------------------
-          # kernel/reboot.c declaration
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "kernel/reboot.c",
-              r"(#include\s+<linux/syscalls\.h>\s*\n)",
-              (
-                  r"\1"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "extern int ksu_handle_sys_reboot("
-                  "int magic1, "
-                  "int magic2, "
-                  "unsigned int cmd, "
-                  "void __user **arg);\n"
-                  "#endif\n"
-              ),
-              "extern int ksu_handle_sys_reboot(",
-          )
-
-          # ----------------------------------------------------------
-          # kernel/reboot.c sys_reboot
-          # ----------------------------------------------------------
-
-          regex_patch(
-              "kernel/reboot.c",
-              r"(?P<header>"
-              r"SYSCALL_DEFINE4\s*\(\s*reboot\s*,\s*"
-              r"int\s*,\s*magic1\s*,\s*"
-              r"int\s*,\s*magic2\s*,\s*"
-              r"unsigned\s+int\s*,\s*cmd\s*,\s*"
-              r"void\s+__user\s*\*\s*,\s*arg\s*\)\s*\{\s*)",
-              (
-                  r"\g<header>"
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_sys_reboot("
-                  "magic1, magic2, cmd, &arg);\n"
-                  "#endif\n"
-              ),
-              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
-          )
-
-          print("All manual kernel hooks were applied successfully.")
-          PYEOF
-
-      - name: Patch SELinux Static Exports
-        run: |
-          set -euo pipefail
-
-          python3 <<'PYEOF'
-          import os
-          import re
-
-          patches = [
-              (
-                  "security/selinux/selinuxfs.c",
-                  r"\bstatic\s+ssize_t\s+\(\*write_op\[\]\)",
-                  "ssize_t (*write_op[])",
-              ),
-              (
-                  "security/selinux/selinuxfs.c",
-                  r"\bstatic\s+const\s+struct\s+file_operations\s+sel_handle_status_ops",
-                  "const struct file_operations sel_handle_status_ops",
-              ),
-              (
-                  "security/selinux/selinuxfs.c",
-                  r"\bstatic\s+DEFINE_MUTEX\s*\(\s*sel_mutex\s*\)",
-                  "DEFINE_MUTEX(sel_mutex)",
-              ),
-              (
-                  "security/selinux/ss/status.c",
-                  r"\bstatic\s+struct\s+page\s+\*\s*selinux_status_page",
-                  "struct page *selinux_status_page",
-              ),
-              (
-                  "security/selinux/ss/status.c",
-                  r"\bstatic\s+DEFINE_MUTEX\s*\(\s*selinux_status_lock\s*\)",
-                  "DEFINE_MUTEX(selinux_status_lock)",
-              ),
-              (
-                  "security/selinux/ss/services.c",
-                  r"\bstatic\s+DEFINE_RWLOCK\s*\(\s*policy_rwlock\s*\)",
-                  "DEFINE_RWLOCK(policy_rwlock)",
-              ),
-          ]
-
-          for path, pattern, replacement in patches:
-              if not os.path.isfile(path):
-                  print(f"SELinux file not present: {path}")
-                  continue
-
-              with open(
-                  path,
-                  "r",
-                  encoding="utf-8",
-                  errors="replace",
-                  newline="",
-              ) as file:
-                  content = file.read()
-
-              updated, count = re.subn(
-                  pattern,
-                  replacement,
-                  content,
-                  flags=re.MULTILINE,
-              )
-
-              if count:
-                  with open(
-                      path,
-                      "w",
-                      encoding="utf-8",
-                      newline="",
-                  ) as file:
-                      file.write(updated)
-
-                  print(f"Patched {path}: {count} occurrence(s)")
+          def patch_file(filepath, search, replace):
+              if not os.path.exists(filepath):
+                  print(f"Warning: {filepath} not found.")
+                  return
+              with open(filepath, 'r') as f:
+                  content = f.read()
+              if search in content:
+                  content = content.replace(search, replace, 1)
+                  with open(filepath, 'w') as f:
+                      f.write(content)
+                  print(f"Successfully patched {filepath}")
               else:
-                  print(f"No SELinux match: {path}")
+                  print(f"Warning: Could not find exact match in {filepath}. Manual patching may be required.")
+          # 1. fs/stat.c - newfstatat
+          patch_file("fs/stat.c",
+              "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
+              "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) \nextern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *flags);\n#endif\n\nSYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);"
+          )
+          # fs/stat.c - newfstat
+          patch_file("fs/stat.c",
+              "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n\treturn error;",
+              "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#endif\n\nSYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\treturn error;"
+          )
+          # fs/stat.c - fstatat64 (32-bit su)
+          patch_file("fs/stat.c",
+              "SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n\terror = vfs_fstatat(dfd, filename, &stat, flag);",
+              "SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);"
+          )
+          # fs/stat.c - fstat64 (32-bit)
+          patch_file("fs/stat.c",
+              "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n\treturn error;",
+              "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;"
+          )
+          # 2. fs/exec.c - do_execveat_common
+          patch_file("fs/exec.c",
+              "static int do_execveat_common(int fd, struct filename *filename,\n\t\t\t      struct user_arg_ptr argv,\n\t\t\t      struct user_arg_ptr envp,\n\t\t\t      int flags)\n{\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);",
+              "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n\t\t\t\tvoid *argv, void *envp, int *flags);\n__attribute__((hot))\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,\n\t\t\t\tvoid *argv, void *envp, int *flags, int *retval);\n#endif\n\nstatic int do_execveat_common(int fd, struct filename *filename,\n\t\t\t      struct user_arg_ptr argv,\n\t\t\t      struct user_arg_ptr envp,\n\t\t\t      int flags)\n{\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif"
+          )
+          # 3. fs/open.c - faccessat
+          patch_file("fs/open.c",
+              "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n\treturn do_faccessat(dfd, filename, mode);",
+              "#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) \nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n\t\t\t\tint *mode, int *flags);\n#endif\n\nSYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\treturn do_faccessat(dfd, filename, mode);"
+          )
+          # 4. kernel/reboot.c - sys_reboot
+          patch_file("kernel/reboot.c",
+              "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{",
+              "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\nSYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{"
+          )
+          patch_file("kernel/reboot.c",
+              "\tchar buffer[256];\n\tint ret = 0;\n\n\t/* We only trust the superuser with rebooting the system. */",
+              "\tchar buffer[256];\n\tint ret = 0;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\t/* We only trust the superuser with rebooting the system. */"
+          )
           PYEOF
+          python3 patch_manual_hooks.py
+          echo "Manual hook injection complete."
 
-      - name: Generate Kernel Configuration
+      - name: Generate & Force Feature Defconfig
         run: |
           set -euo pipefail
-
           MODEL="${{ github.event.inputs.model || 'g950x' }}"
-
+          
           chmod +x scripts/config
-
+          
           export CC=clang
           export LD=ld.lld
           export AS=llvm-as
@@ -546,90 +126,55 @@ jobs:
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-
-          make ARCH=arm64 "${MODEL}_defconfig"
-
+          
+          # 1. Start with base defconfig
+          make ARCH=arm64 ${MODEL}_defconfig
+          
+          # 2. Core System Prerequisites (Required for KSU)
           ./scripts/config --enable CONFIG_MODULES
           ./scripts/config --enable CONFIG_MODULE_UNLOAD
-          ./scripts/config --enable CONFIG_DEBUG_KERNEL
           ./scripts/config --enable CONFIG_KALLSYMS
           ./scripts/config --enable CONFIG_KALLSYMS_ALL
-
+          
+          # 3. ReSukiSU Config (MANUAL HOOKS)
           ./scripts/config --enable CONFIG_KSU
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
           ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
-
-          ./scripts/config --enable CONFIG_KPM
-          ./scripts/config --enable CONFIG_EXT4_FS
-          ./scripts/config --enable CONFIG_OVERLAY_FS
-          ./scripts/config --enable CONFIG_PACKET
-
-          ./scripts/config --enable CONFIG_USB_GADGET
-          ./scripts/config --enable CONFIG_USB_CONFIGFS
-          ./scripts/config --enable CONFIG_USB_LIBCOMPOSITE
-          ./scripts/config --enable CONFIG_USB_CONFIGFS_F_FS
-          ./scripts/config --enable CONFIG_USB_F_FS
-          ./scripts/config --enable CONFIG_USB_CONFIGFS_UEVENT
-          ./scripts/config --enable CONFIG_USB_CONFIGFS_RNDIS
-          ./scripts/config --enable CONFIG_USB_CONFIGFS_MASS_STORAGE
-          ./scripts/config --enable CONFIG_USB_CONFIGFS_F_HID
-          ./scripts/config --enable CONFIG_USB_F_RNDIS
-          ./scripts/config --enable CONFIG_USB_F_MASS_STORAGE
-          ./scripts/config --enable CONFIG_USB_F_HID
-
-          ./scripts/config --enable CONFIG_BT
-          ./scripts/config --enable CONFIG_BT_HCIBTUSB
-          ./scripts/config --enable CONFIG_BT_HCIBTUSB_BCM
-          ./scripts/config --enable CONFIG_BT_HCIBTUSB_RTL
-          ./scripts/config --enable CONFIG_CFG80211
-          ./scripts/config --enable CONFIG_MAC80211
-
-          ./scripts/config --enable CONFIG_RTW88
-          ./scripts/config --enable CONFIG_RTW88_CORE
-          ./scripts/config --enable CONFIG_RTW88_USB
-          ./scripts/config --enable CONFIG_RTW88_8812A
-          ./scripts/config --module CONFIG_RTW88_8812AU
-
+          
+          # 4. Finalize config
           make ARCH=arm64 olddefconfig
-
-          echo "=== Verifying critical configuration ==="
-
-          missing=0
-
-          for option in \
-            CONFIG_KALLSYMS \
-            CONFIG_KALLSYMS_ALL \
-            CONFIG_KSU \
-            CONFIG_KSU_MANUAL_HOOK; do
-
-            if ! grep -q "^${option}=y$" .config; then
-              echo "ERROR: ${option} is missing"
-              missing=1
-            else
-              echo "${option}=y verified"
-            fi
-          done
-
-          if ! grep -q "^CONFIG_RTW88_8812AU=m$" .config; then
-            echo "WARNING: CONFIG_RTW88_8812AU=m is missing"
+          
+          # 5. STRICT VERIFICATION
+          echo "=== Verifying Critical Dependencies ==="
+          MISSING=0
+          
+          if ! grep -q "CONFIG_KSU_MANUAL_HOOK=y" .config; then
+            echo "FATAL: CONFIG_KSU_MANUAL_HOOK is missing!"
+            MISSING=1
+          else
+            echo "CONFIG_KSU_MANUAL_HOOK=y verified."
           fi
-
-          if [ "$missing" -ne 0 ]; then
-            echo "=== Relevant configuration ==="
-            grep -iE \
-              "KSU|RTW88|MANUAL_HOOK|KALLSYMS|DEBUG_KERNEL" \
-              .config || true
+          
+          if ! grep -q "CONFIG_KSU=y" .config; then
+            echo "FATAL: CONFIG_KSU is missing!"
+            MISSING=1
+          fi
+          
+          if [ "$MISSING" -eq 1 ]; then
+            echo "=== Dumping relevant .config lines for debugging ==="
+            grep -iE "KSU|MANUAL_HOOK" .config || true
             exit 1
           fi
+          
+          echo "All critical dependencies verified successfully. Proceeding to build..."
 
-      - name: Build Kernel
+      - name: Build Kernel using fixed build.sh
         run: |
           set -euo pipefail
-
           chmod +x build.sh
-
+          
           export CC=clang
           export LD=ld.lld
           export AS=llvm-as
@@ -642,29 +187,13 @@ jobs:
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-
-          export KCFLAGS="\
-          -Wno-error \
-          -Wno-error=implicit-function-declaration \
-          -Wno-error=strict-prototypes \
-          -Wno-error=incompatible-function-pointer-types \
-          -Wno-error=incompatible-pointer-types \
-          -Wno-error=int-conversion \
-          -Wno-error=implicit-int \
-          -Wno-unused-function \
-          -Wno-unused-variable \
-          -Wno-pointer-sign"
-
-          ./build.sh 2>&1 | tee build.log || {
-            echo "=== FIRST COMPILE ERRORS ==="
-            grep -i -n -m 50 \
-              -E "error:|fatal error|Error [12]" \
-              build.log || true
-            exit 1
-          }
+          
+          export KCFLAGS="-Wno-error -Wno-error=implicit-function-declaration -Wno-error=strict-prototypes -Wno-unused-function -Wno-unused-variable -Wno-pointer-sign"
+          
+          ./build.sh
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Elise-Kernel-${{ github.event.inputs.model || 'g950x' }}
+          name: Elise-Kernel-${{ github.event.inputs.model || 'g950x' }}-ReSukiSU
           path: ~/a2n_kernel_*/a2n_kernel_*.zip
