@@ -477,6 +477,7 @@ typedef enum {
 #define INPUT_FEATURE_ENABLE_SYNC_RR120		(1 << 2) /* sync reportrate 120hz */
 
 #define CMD_RESULT_WORD_LEN		10
+#define SEC_CMD_STR_LEN			256
 
 #define SEC_TS_I2C_RETRY_CNT		3
 #define SEC_TS_WAIT_RETRY_CNT		100
