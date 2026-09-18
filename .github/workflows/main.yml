@@ -113,10 +113,8 @@ jobs:
 
           def read_file(path):
               file = Path(path)
-
               if not file.is_file():
                   raise FileNotFoundError(f"Missing required file: {path}")
-
               return file.read_text(encoding="utf-8")
 
           def write_file(path, content):
@@ -126,33 +124,23 @@ jobs:
               if insertion.strip() in content:
                   return content
 
-              match = re.search(
-                  r"^#include[^\n]*\n",
-                  content,
-                  flags=re.MULTILINE,
-              )
-
+              match = re.search(r"^#include[^\n]*\n", content, flags=re.MULTILINE)
               if match is None:
-                  raise RuntimeError(
-                      f"{description}: include directive not found"
-                  )
+                  raise RuntimeError(f"{description}: include directive not found")
 
-              position = match.end()
-              return content[:position] + insertion + content[position:]
+              pos = match.end()
+              return content[:pos] + insertion + content[pos:]
 
           def insert_after_marker(content, marker, insertion, description):
               if insertion.strip() in content:
                   return content
 
-              position = content.find(marker)
+              pos = content.find(marker)
+              if pos < 0:
+                  raise RuntimeError(f"{description}: marker not found: {marker}")
 
-              if position < 0:
-                  raise RuntimeError(
-                      f"{description}: marker not found: {marker}"
-                  )
-
-              position += len(marker)
-              return content[:position] + insertion + content[position:]
+              pos += len(marker)
+              return content[:pos] + insertion + content[pos:]
 
           def regex_once(content, pattern, replacement, description):
               updated, count = re.subn(
@@ -233,12 +221,10 @@ jobs:
                   "fs/stat.c newfstat hook",
               )
 
-          fstatat64_start = content.find("SYSCALL_DEFINE4(fstatat64")
-
+          fstatat64_start = content.find("SYSCALL_DEFINE4(fstatat64)")
           if (
               fstatat64_start >= 0
-              and "ksu_handle_stat(&dfd, &filename, &flag);"
-              not in content[fstatat64_start:]
+              and "ksu_handle_stat(&dfd, &filename, &flag);" not in content[fstatat64_start:]
           ):
               content = regex_once(
                   content,
@@ -257,8 +243,7 @@ jobs:
                   "fs/stat.c fstatat64 hook",
               )
 
-          fstat64_start = content.find("SYSCALL_DEFINE2(fstat64")
-
+          fstat64_start = content.find("SYSCALL_DEFINE2(fstat64)")
           if (
               fstat64_start >= 0
               and "ksu_handle_newfstat_ret(" not in content[fstat64_start:]
@@ -503,7 +488,6 @@ jobs:
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
           chmod +x scripts/config
-
           make "${MODEL}_defconfig"
 
           ./scripts/config --enable CONFIG_MODULES
@@ -552,3 +536,4 @@ jobs:
           name: Elise-Kernel-${{ github.event.inputs.model || 'g950x' }}-ReSukiSU-RootCapable
           path: ~/a2n_kernel_*/a2n_kernel_*.zip
           if-no-files-found: error
+          
