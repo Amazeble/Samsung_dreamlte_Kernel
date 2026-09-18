@@ -76,10 +76,10 @@ jobs:
           git clone https://github.com/ReSukiSU/ReSukiSU.git KernelSU
           git -C KernelSU checkout --detach "${RESUKISU_COMMIT}"
 
-          if [ ! -d drivers ]; then
-            echo "ERROR: drivers/ directory not found in kernel tree"
+          test -d drivers || {
+            echo "ERROR: drivers/ directory not found"
             exit 1
-          fi
+          }
 
           ln -sfn \
             "$(realpath --relative-to=drivers KernelSU/kernel)" \
@@ -90,7 +90,8 @@ jobs:
           fi
 
           if ! grep -qF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
-            sed -i '/^[[:space:]]*endmenu/i source "drivers/kernelsu/Kconfig"' \
+            sed -i \
+              '/^[[:space:]]*endmenu/i source "drivers/kernelsu/Kconfig"' \
               drivers/Kconfig
           fi
 
@@ -106,63 +107,83 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          python3 <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
           import re
 
-def read(path):
-    file = Path(path)
-    if not file.is_file():
-        raise FileNotFoundError(f"Missing required file: {path}")
-    return file.read_text(encoding="utf-8")
+          def read_file(path):
+              file = Path(path)
 
+              if not file.is_file():
+                  raise FileNotFoundError(f"Missing required file: {path}")
 
-def write(path, content):
-    Path(path).write_text(content, encoding="utf-8")
+              return file.read_text(encoding="utf-8")
 
+          def write_file(path, content):
+              Path(path).write_text(content, encoding="utf-8")
 
-def regex_once(content, pattern, replacement, description):
-    updated, count = re.subn(
-        pattern,
-        replacement,
-        content,
-        count=1,
-        flags=re.MULTILINE | re.DOTALL,
-    )
+          def insert_after_first_include(content, insertion, description):
+              if insertion.strip() in content:
+                  return content
 
-    if count != 1:
-        raise RuntimeError(
-            f"{description}: expected exactly one match, found {count}"
-        )
+              match = re.search(
+                  r"^#include[^\n]*\n",
+                  content,
+                  flags=re.MULTILINE,
+              )
 
-    return updated
+              if match is None:
+                  raise RuntimeError(
+                      f"{description}: include directive not found"
+                  )
 
+              position = match.end()
+              return content[:position] + insertion + content[position:]
 
-def add_once(content, marker, insertion, description):
-    if insertion.strip() in content:
-        return content
+          def insert_after_marker(content, marker, insertion, description):
+              if insertion.strip() in content:
+                  return content
 
-    index = content.find(marker)
-    if index < 0:
-        raise RuntimeError(
-            f"{description}: insertion marker was not found"
-        )
+              position = content.find(marker)
 
-    index += len(marker)
-    return content[:index] + insertion + content[index:]
+              if position < 0:
+                  raise RuntimeError(
+                      f"{description}: marker not found: {marker}"
+                  )
+
+              position += len(marker)
+              return content[:position] + insertion + content[position:]
+
+          def regex_once(content, pattern, replacement, description):
+              updated, count = re.subn(
+                  pattern,
+                  replacement,
+                  content,
+                  count=1,
+                  flags=re.MULTILINE | re.DOTALL,
+              )
+
+              if count != 1:
+                  raise RuntimeError(
+                      f"{description}: expected one match, found {count}"
+                  )
+
+              return updated
 
           # ------------------------------------------------------------
           # fs/stat.c
           # ------------------------------------------------------------
           path = "fs/stat.c"
-          content = read(path)
+          content = read_file(path)
 
-          declarations = r"""
+          stat_declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
-          extern int ksu_handle_stat(int *dfd,
-                                     const char __user **filename_user,
-                                     int *flags);
+          extern int ksu_handle_stat(
+                  int *dfd,
+                  const char __user **filename_user,
+                  int *flags);
+
           extern void ksu_handle_newfstat_ret(
                   unsigned int *fd,
                   struct stat __user **statbuf_ptr);
@@ -170,89 +191,104 @@ def add_once(content, marker, insertion, description):
 
           """
 
-          content = add_once(
+          content = insert_after_marker(
               content,
               "#include <asm/unistd.h>",
-              declarations,
+              stat_declarations,
               "fs/stat.c declarations",
           )
 
-          # newfstatat() hook.
           if "ksu_handle_stat(&dfd, &filename, &flag);" not in content:
               content = regex_once(
                   content,
-                  r"""(SYSCALL_DEFINE4\(\s*newfstatat\s*,.*?
+                  r"""(
+                      SYSCALL_DEFINE4\(\s*newfstatat\s*,.*?
                       \{\s*
-                      \tstruct\s+kstat\s+stat;\s*
-                      \tint\s+error;\s*)""",
+                      \s*struct\s+kstat\s+stat\s*;\s*
+                      \s*int\s+error\s*;\s*
+                  )""",
                   r"""\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_stat(&dfd, &filename, &flag);
           #endif
+
           """,
                   "fs/stat.c newfstatat hook",
               )
 
-          # newfstat() return hook.
           if "ksu_handle_newfstat_ret(&fd, &statbuf);" not in content:
               content = regex_once(
                   content,
-                  r"""(SYSCALL_DEFINE2\(\s*newfstat\s*,.*?
-                      \tif\s*\(\s*!error\s*\)\s*
-                      \terror\s*=\s*cp_new_stat\s*\(\s*&stat\s*,\s*statbuf\s*\)\s*;\s*)""",
+                  r"""(
+                      SYSCALL_DEFINE2\(\s*newfstat\s*,.*?
+                      if\s*\(\s*!error\s*\)\s*
+                      error\s*=\s*cp_new_stat\s*\(\s*&stat\s*,\s*statbuf\s*\)\s*;\s*
+                  )""",
                   r"""\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_newfstat_ret(&fd, &statbuf);
           #endif
+
           """,
                   "fs/stat.c newfstat hook",
               )
 
-          # fstatat64() uses the same path hook when this architecture exposes it.
-          if "ksu_handle_stat(&dfd, &filename, &flag);" not in content[
-              content.find("SYSCALL_DEFINE4(fstatat64")
-          :]:
+          fstatat64_start = content.find("SYSCALL_DEFINE4(fstatat64")
+
+          if (
+              fstatat64_start >= 0
+              and "ksu_handle_stat(&dfd, &filename, &flag);"
+              not in content[fstatat64_start:]
+          ):
               content = regex_once(
                   content,
-                  r"""(SYSCALL_DEFINE4\(\s*fstatat64\s*,.*?
+                  r"""(
+                      SYSCALL_DEFINE4\(\s*fstatat64\s*,.*?
                       \{\s*
-                      \tstruct\s+kstat\s+stat;\s*
-                      \tint\s+error;\s*)""",
+                      \s*struct\s+kstat\s+stat\s*;\s*
+                      \s*int\s+error\s*;\s*
+                  )""",
                   r"""\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_stat(&dfd, &filename, &flag);
           #endif
+
           """,
                   "fs/stat.c fstatat64 hook",
               )
 
-          # fstat64() return hook. ReSukiSU uses the newfstat return handler.
-          if "ksu_handle_newfstat_ret(&fd, &statbuf);" not in content[
-              content.find("SYSCALL_DEFINE2(fstat64")
-          :]:
+          fstat64_start = content.find("SYSCALL_DEFINE2(fstat64")
+
+          if (
+              fstat64_start >= 0
+              and "ksu_handle_newfstat_ret(" not in content[fstat64_start:]
+          ):
               content = regex_once(
                   content,
-                  r"""(SYSCALL_DEFINE2\(\s*fstat64\s*,.*?
-                      \tif\s*\(\s*!error\s*\)\s*
-                      \terror\s*=\s*cp_new_stat64\s*\(\s*&stat\s*,\s*statbuf\s*\)\s*;\s*)""",
+                  r"""(
+                      SYSCALL_DEFINE2\(\s*fstat64\s*,.*?
+                      if\s*\(\s*!error\s*\)\s*
+                      error\s*=\s*cp_new_stat64\s*\(\s*&stat\s*,\s*statbuf\s*\)\s*;\s*
+                  )""",
                   r"""\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_newfstat_ret(
                   (unsigned int *)&fd,
                   (struct stat __user **)&statbuf);
           #endif
+
           """,
                   "fs/stat.c fstat64 hook",
               )
 
-          write(path, content)
+          write_file(path, content)
           print("Patched fs/stat.c")
 
           # ------------------------------------------------------------
           # fs/exec.c
           # ------------------------------------------------------------
           path = "fs/exec.c"
-          content = read(path)
+          content = read_file(path)
 
           exec_declaration = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
@@ -267,43 +303,39 @@ def add_once(content, marker, insertion, description):
 
           """
 
-          content = add_once(
+          content = insert_after_first_include(
               content,
-              "#include ",
-              "",
-              "fs/exec.c",
-          ) if False else content
-
-          if "ksu_handle_execveat" not in content:
-              include_match = re.search(r"^#include[^\n]*\n", content, re.MULTILINE)
-              if not include_match:
-                  raise RuntimeError("fs/exec.c: include marker was not found")
-              pos = include_match.end()
-              content = content[:pos] + exec_declaration + content[pos:]
+              exec_declaration,
+              "fs/exec.c declarations",
+          )
 
           if "ksu_handle_execveat(&fd" not in content:
               content = regex_once(
                   content,
-                  r"""(static\s+int\s+do_execveat_common\s*\(
-                      .*?\)\s*
-                      \{\s*)""",
+                  r"""(
+                      static\s+int\s+do_execveat_common\s*\(
+                      .*?
+                      \)\s*
+                      \{\s*
+                  )""",
                   r"""\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
               if (ksu_handle_execveat(&fd, &filename, argv, envp, &flags))
                   return -EACCES;
           #endif
+
           """,
                   "fs/exec.c execveat hook",
               )
 
-          write(path, content)
+          write_file(path, content)
           print("Patched fs/exec.c")
 
           # ------------------------------------------------------------
           # fs/open.c
           # ------------------------------------------------------------
           path = "fs/open.c"
-          content = read(path)
+          content = read_file(path)
 
           open_declaration = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
@@ -317,35 +349,37 @@ def add_once(content, marker, insertion, description):
 
           """
 
-          if "ksu_handle_faccessat" not in content:
-              include_match = re.search(r"^#include[^\n]*\n", content, re.MULTILINE)
-              if not include_match:
-                  raise RuntimeError("fs/open.c: include marker was not found")
-              pos = include_match.end()
-              content = content[:pos] + open_declaration + content[pos:]
+          content = insert_after_first_include(
+              content,
+              open_declaration,
+              "fs/open.c declarations",
+          )
 
           if "ksu_handle_faccessat(&dfd" not in content:
               content = regex_once(
                   content,
-                  r"""(SYSCALL_DEFINE3\(\s*faccessat\s*,.*?
-                      \{\s*)""",
+                  r"""(
+                      SYSCALL_DEFINE3\(\s*faccessat\s*,.*?
+                      \{\s*
+                  )""",
                   r"""\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
               if (ksu_handle_faccessat(&dfd, &filename, &mode, NULL))
                   return -EACCES;
           #endif
+
           """,
                   "fs/open.c faccessat hook",
               )
 
-          write(path, content)
+          write_file(path, content)
           print("Patched fs/open.c")
 
           # ------------------------------------------------------------
           # kernel/reboot.c
           # ------------------------------------------------------------
           path = "kernel/reboot.c"
-          content = read(path)
+          content = read_file(path)
 
           reboot_declaration = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
@@ -358,30 +392,30 @@ def add_once(content, marker, insertion, description):
 
           """
 
-          if "ksu_handle_sys_reboot" not in content:
-              include_match = re.search(r"^#include[^\n]*\n", content, re.MULTILINE)
-              if not include_match:
-                  raise RuntimeError(
-                      "kernel/reboot.c: include marker was not found"
-                  )
-              pos = include_match.end()
-              content = content[:pos] + reboot_declaration + content[pos:]
+          content = insert_after_first_include(
+              content,
+              reboot_declaration,
+              "kernel/reboot.c declarations",
+          )
 
           if "ksu_handle_sys_reboot(magic1" not in content:
               content = regex_once(
                   content,
-                  r"""(SYSCALL_DEFINE4\(\s*reboot\s*,.*?
-                      \{\s*)""",
+                  r"""(
+                      SYSCALL_DEFINE4\(\s*reboot\s*,.*?
+                      \{\s*
+                  )""",
                   r"""\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
               if (ksu_handle_sys_reboot(magic1, magic2, cmd, &arg))
                   return -EPERM;
           #endif
+
           """,
                   "kernel/reboot.c reboot hook",
               )
 
-          write(path, content)
+          write_file(path, content)
           print("Patched kernel/reboot.c")
           PY
 
@@ -406,7 +440,7 @@ def add_once(content, marker, insertion, description):
 
             if grep -qF "${old}" "${file}"; then
               sed -i "s|${old}|${new}|g" "${file}"
-              echo "Patched ${file}: ${old}"
+              echo "Patched ${file}"
             fi
           }
 
@@ -469,6 +503,7 @@ def add_once(content, marker, insertion, description):
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
           chmod +x scripts/config
+
           make "${MODEL}_defconfig"
 
           ./scripts/config --enable CONFIG_MODULES
