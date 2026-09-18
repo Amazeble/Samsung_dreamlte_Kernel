@@ -110,43 +110,46 @@ jobs:
           from pathlib import Path
           import re
 
-          def read(path):
-              file = Path(path)
-              if not file.is_file():
-                  raise FileNotFoundError(f"Missing required file: {path}")
-              return file.read_text(encoding="utf-8")
+def read(path):
+    file = Path(path)
+    if not file.is_file():
+        raise FileNotFoundError(f"Missing required file: {path}")
+    return file.read_text(encoding="utf-8")
 
-          def write(path, content):
-              Path(path).write_text(content, encoding="utf-8")
 
-          def regex_once(content, pattern, replacement, description):
-              updated, count = re.sub(
-                  pattern,
-                  replacement,
-                  content,
-                  count=1,
-                  flags=re.MULTILINE | re.DOTALL,
-              )
+def write(path, content):
+    Path(path).write_text(content, encoding="utf-8")
 
-              if count == 0:
-                  raise RuntimeError(
-                      f"{description}: source anchor was not found"
-                  )
 
-              return updated
+def regex_once(content, pattern, replacement, description):
+    updated, count = re.subn(
+        pattern,
+        replacement,
+        content,
+        count=1,
+        flags=re.MULTILINE | re.DOTALL,
+    )
 
-          def add_once(content, marker, insertion, description):
-              if insertion.strip() in content:
-                  return content
+    if count != 1:
+        raise RuntimeError(
+            f"{description}: expected exactly one match, found {count}"
+        )
 
-              index = content.find(marker)
-              if index < 0:
-                  raise RuntimeError(
-                      f"{description}: insertion marker was not found"
-                  )
+    return updated
 
-              index += len(marker)
-              return content[:index] + insertion + content[index:]
+
+def add_once(content, marker, insertion, description):
+    if insertion.strip() in content:
+        return content
+
+    index = content.find(marker)
+    if index < 0:
+        raise RuntimeError(
+            f"{description}: insertion marker was not found"
+        )
+
+    index += len(marker)
+    return content[:index] + insertion + content[index:]
 
           # ------------------------------------------------------------
           # fs/stat.c
