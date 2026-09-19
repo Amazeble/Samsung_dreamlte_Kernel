@@ -264,5 +264,9 @@ extern void selnl_notify_setenforce(int val);
 extern void selnl_notify_policyload(u32 seqno);
 extern int selinux_nlmsg_lookup(u16 sclass, u16 nlmsg_type, u32 *perm);
 
+/* ReSukiSU SELinux integration: exported file operations */
+extern const struct file_operations sel_handle_status_ops;
+extern ssize_t (*write_op[])(struct file *, char *, size_t);
+
 #endif /* _SELINUX_SECURITY_H_ */
 

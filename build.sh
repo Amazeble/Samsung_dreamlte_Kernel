@@ -47,6 +47,22 @@ fi
 # Merge configs
 ARCH=arm64 scripts/kconfig/merge_config.sh arch/arm64/configs/g950x_defconfig arch/arm64/configs/${MODEL}_defconfig
 
+# Re-apply options required by ReSukiSU after merge_config.sh
+scripts/config --enable CONFIG_KALLSYMS
+scripts/config --enable CONFIG_KALLSYMS_ALL
+scripts/config --enable CONFIG_MODULES
+scripts/config --enable CONFIG_MODULE_UNLOAD
+scripts/config --enable CONFIG_KSU
+scripts/config --enable CONFIG_KSU_MANUAL_HOOK
+
+make olddefconfig
+
+# Fail early with a useful message
+grep -q '^CONFIG_KALLSYMS_ALL=y$' .config || {
+    echo "ERROR: CONFIG_KALLSYMS_ALL is not enabled"
+    exit 1
+}
+
 # Build kernel
 make -j"$N" "$@"
 
