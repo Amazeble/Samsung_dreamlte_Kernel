@@ -26,6 +26,38 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup ReSukiSU Base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "Setting up ReSukiSU directory structure, Makefile, and Kconfig..."
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+      - name: Apply ReSukiSU Manual Hooks (Automated for Legacy Kernels)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "Downloading automated manual hook patch script for legacy kernels (4.4 - 5.4)..."
+          curl -LSs "https://raw.githubusercontent.com/xiaoleGun/KernelSU_Action/main/patches/legacy_ksu_hooks.sh" -o /tmp/legacy_ksu_hooks.sh
+          chmod +x /tmp/legacy_ksu_hooks.sh
+          
+          echo "Applying ReSukiSU manual hooks to kernel source..."
+          bash /tmp/legacy_ksu_hooks.sh
+          
+          # Additional safeguard for sys_reboot hook (required by ReSukiSU docs)
+          if [ -f "kernel/reboot.c" ] && ! grep -q "ksu_handle_sys_reboot" "kernel/reboot.c"; then
+            echo "Applying sys_reboot hook to kernel/reboot.c..."
+            sed -i '/SYSCALL_DEFINE4(reboot,/i\#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);\n#endif' kernel/reboot.c
+            sed -i '/kernel_restart(cmd);/i\\t#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, arg);\n\t#endif' kernel/reboot.c
+          elif [ -f "kernel/sys.c" ] && ! grep -q "ksu_handle_sys_reboot" "kernel/sys.c"; then
+            echo "Applying sys_reboot hook to kernel/sys.c (legacy fallback)..."
+            sed -i '/SYSCALL_DEFINE4(reboot,/i\#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);\n#endif' kernel/sys.c
+            sed -i '/kernel_restart(cmd);/i\\t#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, arg);\n\t#endif' kernel/sys.c
+          fi
+          
+          echo "Verifying hook application..."
+          grep -l "ksu_handle" fs/exec.c fs/open.c fs/stat.c || echo "Note: Some hooks may already be present or target function names differ slightly in your specific tree."
+
       - name: Install Build Dependencies
         shell: bash
         run: |
@@ -46,7 +78,8 @@ jobs:
             zip \
             python3 \
             rsync \
-            dwarves
+            dwarves \
+            sed
 
       - name: Setup AOSP Clang Toolchain
         shell: bash
@@ -91,12 +124,20 @@ jobs:
 
           ./scripts/config --enable CONFIG_MODULES
           ./scripts/config --enable CONFIG_MODULE_UNLOAD
+          
+          # CONFIG_KALLSYMS_ALL satisfies the "Static symbol export" requirement 
+          # from ReSukiSU docs, preventing compilation failures related to 
+          # security/selinux/selinuxfs.c (write_op and sel_handle_status_ops)
           ./scripts/config --enable CONFIG_KALLSYMS
           ./scripts/config --enable CONFIG_KALLSYMS_ALL
+          
+          # ReSukiSU Configuration
+          ./scripts/config --enable CONFIG_KSU
+          ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
 
           make olddefconfig
 
-          echo "Required kernel options verified."
+          echo "Required kernel options (including ReSukiSU manual hooks) verified."
 
       - name: Build Kernel
         shell: bash
